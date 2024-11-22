@@ -6,6 +6,8 @@
 #include <lauxlib.h>
 #include "llama-run.h"
 #include "llama.h"
+#include "ggml.h"
+#include "ggml-backend.h"
 
 extern lua_State *wasm_lua_state;
 

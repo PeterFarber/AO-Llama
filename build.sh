@@ -1,4 +1,6 @@
 #!/bin/bash
+set -x
+
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
 LLAMA_CPP_DIR="${SCRIPT_DIR}/build/llamacpp"
@@ -6,29 +8,34 @@ AO_LLAMA_DIR="${SCRIPT_DIR}/build/ao-llama"
 PROCESS_DIR="${SCRIPT_DIR}/aos/process"
 LIBS_DIR="${PROCESS_DIR}/libs"
 
-AO_IMAGE="p3rmaw3b/ao:0.1.2" # Needs new version
+AO_IMAGE="p3rmaw3b/ao:0.1.4" # Needs new version
 
 EMXX_CFLAGS="-s MEMORY64=1"
 
 # Clone llama.cpp if it doesn't exist
-rm -rf ${LLAMA_CPP_DIR}
+# rm -rf ${LLAMA_CPP_DIR}
+rm -rf aos/process/libs
 rm -rf libs
+
 if [ ! -d "${LLAMA_CPP_DIR}" ]; then \
 	git clone https://github.com/ggerganov/llama.cpp.git ${LLAMA_CPP_DIR}; \
-	cd ${LLAMA_CPP_DIR}; git checkout tags/b3233 -b b3233; \
+	cd ${LLAMA_CPP_DIR}; git checkout tags/b4149 -b b4149; \
 fi
 cd ..
 
 # Patch llama.cpp to remove alignment asserts
-sed -i.bak 's/#define ggml_assert_aligned.*/#define ggml_assert_aligned\(ptr\)/g' ${LLAMA_CPP_DIR}/ggml.c
-sed -i.bak '/.*GGML_ASSERT.*GGML_MEM_ALIGN == 0.*/d' ${LLAMA_CPP_DIR}/ggml.c
+sed -i.bak 's/#define ggml_assert_aligned.*/#define ggml_assert_aligned\(ptr\)/g' ${LLAMA_CPP_DIR}/ggml/src/ggml.c
+sed -i.bak '/.*GGML_ASSERT.*GGML_MEM_ALIGN == 0.*/d' ${LLAMA_CPP_DIR}/ggml/src/ggml.c
 
 # Build llama.cpp into a static library with emscripten
 sudo docker run -v ${LLAMA_CPP_DIR}:/llamacpp ${AO_IMAGE} sh -c \
-		"cd /llamacpp && emcmake cmake -DCMAKE_CXX_FLAGS='${EMXX_CFLAGS}' -S . -B . -DLLAMA_BUILD_EXAMPLES=OFF"
+        "cd /llamacpp && emcmake cmake -DCMAKE_CXX_FLAGS='${EMXX_CFLAGS}' -S . -B . -DLLAMA_BUILD_EXAMPLES=OFF -DGGML_USE_CPU=ON"
+
+
+# later versions need ggml-cpu also
 
 sudo docker run -v ${LLAMA_CPP_DIR}:/llamacpp ${AO_IMAGE} sh -c \
-		"cd /llamacpp && emmake make llama common EMCC_CFLAGS='${EMXX_CFLAGS}'" 
+        "cd /llamacpp && emmake make -j16 llama common EMCC_CFLAGS='${EMXX_CFLAGS}'"
 
 sudo docker run -v ${LLAMA_CPP_DIR}:/llamacpp  -v ${AO_LLAMA_DIR}:/ao-llama ${AO_IMAGE} sh -c \
 		"cd /ao-llama && ./build.sh"
@@ -39,8 +46,13 @@ sudo chmod -R 777 ${AO_LLAMA_DIR}
 
 # Copy llama.cpp to the libs directory
 mkdir -p $LIBS_DIR/llamacpp/common
-cp ${LLAMA_CPP_DIR}/libllama.a $LIBS_DIR/llamacpp/libllama.a
+mkdir -p $LIBS_DIR/llamacpp/ggml/src
+mkdir -p $LIBS_DIR/llamacpp/ggml/ggml-cpu
+cp ${LLAMA_CPP_DIR}/src/libllama.a $LIBS_DIR/llamacpp/libllama.a
 cp ${LLAMA_CPP_DIR}/common/libcommon.a $LIBS_DIR/llamacpp/common/libcommon.a
+cp ${LLAMA_CPP_DIR}/ggml/src/libggml.a $LIBS_DIR/llamacpp/ggml/src/libggml.a
+# cp ${LLAMA_CPP_DIR}/ggml/src/libggml-base.a $LIBS_DIR/llamacpp/ggml/src/libggml-base.a
+# cp ${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/libggml-cpu.a $LIBS_DIR/llamacpp/ggml/ggml-cpu/libggml-cpu.a
 
 # Copy ao-llama to the libs directory
 mkdir -p $LIBS_DIR/ao-llama

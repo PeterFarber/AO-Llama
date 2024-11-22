@@ -111,53 +111,57 @@ end`), getEnv())
     assert.ok(result.response.Output.data.output.length == 10)
   })
 
-  it.skip('Llama Lua library loads', async () => {
+  it('Llama Lua library loads', async () => {
     const result = await handle(getEval(`
 local Llama = require(".Llama")
 --llama.load("/data/ggml-tiny.en.bin")
 return Llama.info()
 `), getEnv())
-    assert.ok(result.response.Output.data.output == "Decentralized llama.cpp.")
+    console.log(' OUT ', result.response.Output.data)
+    assert.ok(result.response.Output.data == "A decentralized LLM inference engine, built on top of llama.cpp.")
   })
 
-  it.skip('AOS runs GPT-2-XL model', async () => {
+  it('AOS runs gemma 2b', async () => {
     const result = await handle(getEval(`
   local Llama = require(".Llama")
+  Llama.logLevel = -1
   io.stderr:write([[Loading model...\n]])
-  local result = Llama.load("/data/M-OzkyjxWhSvWYF87p0kvmkuAEEkvOzIj4nMNoSIydc")
+  local result = Llama.load("/data/RnU30TbiNEerOeM6okmTiK7SZJ9tDQ3lCygSQSZ4KG8")
   io.stderr:write([[Loaded! Setting prompt 1...\n]])
   Llama.setPrompt("Once upon a time")
   io.stderr:write([[Prompt set! Running...\n]])
   local str = Llama.run(30)
   return str
   `), getEnv())
-  console.log(result.response)
+    console.log(' OUT ', result.response)
 
-    console.log("START SECOND MESSAGE")
-    const result2 = await handle(getEval(`
-    Llama.setPrompt("How do you feel about rabbits? ")
-    io.stderr:write([[Prompt set! Running 2...\n]])
-    local str = Llama.run(30)
-    return str
-    `), getEnv())
-    console.log(result2.response)
-    assert.ok(result.response.Output.data.output.length > 10)
+    // console.log("START SECOND MESSAGE")
+    // const result2 = await handle(getEval(`
+    // Llama.setPrompt("How do you feel about rabbits? ")
+    // io.stderr:write([[Prompt set! Running 2...\n]])
+    // local str = Llama.run(30)
+    // return str
+    // `), getEnv())
+    // console.log(result2.response)
+    // assert.ok(result.response.Output.data.output.length > 10)
   })
 
-  it.skip('AOS runs GPT-2 1.5b model', async () => {
+  it('AOS runs GPT-2 1.5b model', async () => {
     const result = await handle(
-      getLua('M-OzkyjxWhSvWYF87p0kvmkuAEEkvOzIj4nMNoSIydc', 10),
+      getLua('tbjTJMP8zMrOcw8qKyctG7jgaTylL7DlHSp_eVTFQFI', 10),
       getEnv())
-    console.log(result.response)
+    console.log(result)
     console.log("SIZE:", instance.HEAP8.length)
     assert.ok(result.response.Output.data.output.length > 10)
   })
 
-  it.skip('AOS loads Phi-2', async () => {
+  it('AOS loads Phi-2', async () => {
     const result = await handle(getEval(`
   local Llama = require(".Llama")
-  Llama.load('/data/kd34P4974oqZf2Db-hFTUiCipsU6CzbR6t-iJoQhKIo')
-  --Llama.setPrompt([[<|user|>Can you write a HelloWorld function in js<|end|><|assistant|>]])
+  Llama.logLevel = -1
+  Llama.logToStderr = false
+  Llama.load('/data/tbjTJMP8zMrOcw8qKyctG7jgaTylL7DlHSp_eVTFQFI')
+  Llama.setPrompt([[<|user|>Can you write a HelloWorld function in js<|end|><|assistant|>]])
   return Llama.run(10)
   `), getEnv())
     console.log(result.response)
