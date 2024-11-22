@@ -19,7 +19,7 @@ rm -rf libs
 
 if [ ! -d "${LLAMA_CPP_DIR}" ]; then \
 	git clone https://github.com/ggerganov/llama.cpp.git ${LLAMA_CPP_DIR}; \
-	cd ${LLAMA_CPP_DIR}; git checkout tags/b4149 -b b4149; \
+	cd ${LLAMA_CPP_DIR}; git checkout tags/b3997 -b b3997; \
 fi
 cd ..
 
