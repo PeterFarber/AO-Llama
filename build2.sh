@@ -10,7 +10,7 @@ LIBS_DIR="${PROCESS_DIR}/libs"
 
 AO_IMAGE="p3rmaw3b/ao:0.1.4"
 
-EMXX_FLAGS="-msimd128 -O3 -flto -mbulk-memory \
+EMXX_FLAGS="-msimd128 -O3 -flto -fno-rtti -Wno-experimental -mbulk-memory \
             -s MEMORY64=1 \
             -s SUPPORT_LONGJMP=1"
 
