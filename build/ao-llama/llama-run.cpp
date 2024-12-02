@@ -2,6 +2,7 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "common.h"
+#include <unordered_map>
 
 #include <cmath>
 #include <cstdio>
@@ -10,16 +11,20 @@
 #include <vector>
 #include <memory>
 #include <stdexcept>
+#include <thread>
+#include <algorithm>
 
-#define CTX_SIZE 2048
+#define CTX_SIZE 8192
 #define BATCH_SIZE 512
 #define MAX_TOKEN_LEN 256
+#define DEFAULT_TEMP 0.8f
 
 struct params_struct {
     std::string model;
     std::string prompt;
-    int n_threads = 4;
-    int n_threads_batch = 4;
+    int n_threads = 1;
+    int n_threads_batch = 1;
+    float temperature = DEFAULT_TEMP;
 };
 
 // Global variables
@@ -31,6 +36,53 @@ static int tks_processed = 0;
 
 extern "C" bool l_llama_on_progress(float progress, void* user_data);
 extern "C" void l_llama_on_log(enum ggml_log_level level, const char* text, void* user_data);
+
+// Simplify TokenMapping to just handle basic whitespace cases
+struct TokenMapping {
+    llama_token token_id;
+    std::string raw_text;
+    std::string replacement;
+};
+
+// Global vector for special tokens
+static std::vector<TokenMapping> special_tokens;
+
+void initialize_special_tokens(llama_model* model) {
+    special_tokens.clear();
+    
+    // Get vocabulary size
+    const int n_vocab = llama_n_vocab(model);
+    
+    // Only handle the most common special tokens
+    const std::vector<std::pair<std::string, std::string>> token_mappings = {
+        {"Ġ", " "},     // Space at start of word
+        {"▁", " "},     // Alternative space marker
+        {"Ċ", "\n"},    // Newline
+        {"ĉ", "\n"},    // Alternative newline
+        {"<0x0A>", "\n"}, // Hex newline
+        {"<0x20>", " "}, // Hex space
+    };
+
+    // Scan vocabulary for special tokens
+    for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
+        const char* token_str = llama_token_get_text(model, token_id);
+        if (!token_str) continue;
+        
+        std::string token_text(token_str);
+        
+        // Check for exact matches in our mappings
+        for (const auto& [pattern, replacement] : token_mappings) {
+            if (token_text == pattern) {  // Only exact matches
+                special_tokens.push_back({token_id, token_text, replacement});
+                fprintf(stderr, "Found special token: '%s' (id: %d) -> '%s'\n", 
+                        token_text.c_str(), token_id, replacement.c_str());
+                break;
+            }
+        }
+    }
+
+    fprintf(stderr, "Initialized %zu special tokens\n", special_tokens.size());
+}
 
 // Helper function to safely free resources
 void cleanup_resources() {
@@ -126,6 +178,21 @@ extern "C" int llama_load(char* model_path) {
         return 1;
     }
 
+    // Initialize special tokens
+    initialize_special_tokens(model);
+    fprintf(stderr, "Initialized %zu special tokens\n", special_tokens.size());
+    
+    // Add vocabulary size check
+    const int n_vocab = llama_n_vocab(model);
+    fprintf(stderr, "Model loaded with vocabulary size: %d\n", n_vocab);
+    
+    if (n_vocab <= 0) {
+        fprintf(stderr, "Invalid vocabulary size\n");
+        llama_free_model(model);
+        model = nullptr;
+        return 1;
+    }
+
     return 0;
 }
 
@@ -137,16 +204,25 @@ void llama_reset_context() {
     cleanup_resources();
     tks_processed = 0;
 
+    fprintf(stderr, "Initializing new batch...\n");
     batch = llama_batch_init(BATCH_SIZE, 0, 1);
     
     llama_context_params ctx_params = llama_context_default_params();
     const int n_ctx_train = llama_n_ctx_train(model);
     ctx_params.n_ctx = std::min(CTX_SIZE, n_ctx_train);
-    ctx_params.n_threads = params.n_threads;
-    ctx_params.n_threads_batch = params.n_threads_batch;
-    ctx_params.offload_kqv = true; 
-    ctx_params.embeddings = false;  
+    
+    ctx_params.n_threads = 1;
+    ctx_params.n_threads_batch = 1;
+    ctx_params.offload_kqv = true;
+    ctx_params.embeddings = false;
+    
+    ctx_params.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_LINEAR;
+    ctx_params.rope_freq_base = 10000.0f;
+    ctx_params.rope_freq_scale = 1.0f;
 
+    fprintf(stderr, "Creating new context (n_ctx: %d, n_threads: %d)...\n", 
+            ctx_params.n_ctx, ctx_params.n_threads);
+    
     ctx = llama_new_context_with_model(model, ctx_params);
 
     if (!ctx) {
@@ -154,7 +230,7 @@ void llama_reset_context() {
         return;
     }
 
-    l_llama_on_log(GGML_LOG_LEVEL_INFO, "Context created successfully", nullptr);
+    fprintf(stderr, "Context created successfully\n");
 }
 
 extern "C" int llama_set_prompt(char* prompt) {
@@ -162,65 +238,126 @@ extern "C" int llama_set_prompt(char* prompt) {
         l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Invalid prompt or model not loaded", nullptr);
         return 1;
     }
-    fprintf(stderr, "Resetting context...\n");
+    
     llama_reset_context();
     params.prompt = prompt;
 
-    fprintf(stderr, "Tokenizing prompt...\n");
-
-    std::vector<llama_token> tokens_list = tokenize(ctx, params.prompt, true);
+    // Tokenize without BOS token since we'll add it manually
+    std::vector<llama_token> tokens_list = tokenize(ctx, params.prompt, false);
     if (tokens_list.empty()) {
+        l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Tokenization failed", nullptr);
         return 1;
     }
 
-    if (isCtxFull()) {
-        l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Context full", nullptr);
+    // Process BOS token first
+    common_batch_clear(batch);
+    common_batch_add(batch, llama_token_bos(model), 0, {0}, false);
+    
+    if (llama_decode(ctx, batch) != 0) {
+        l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Decode failed for BOS token", nullptr);
         return 1;
     }
+    tks_processed++;
 
-    // Handle encoder models specifically
-    if (llama_model_has_encoder(model)) {
-        fprintf(stderr, "Encoding prompt...\n");
-        for (size_t i = 0; i < tokens_list.size(); i++) {
-            common_batch_add(batch, tokens_list[i], i, {0}, false);
-            tks_processed++;
+    // Process prompt tokens in chunks
+    const size_t chunk_size = BATCH_SIZE - 1;  // Leave room for safety
+    for (size_t i = 0; i < tokens_list.size(); i += chunk_size) {
+        common_batch_clear(batch);
+        
+        // Calculate size of current chunk
+        size_t current_chunk_size = std::min(chunk_size, tokens_list.size() - i);
+        
+        // Add tokens for this chunk
+        for (size_t j = 0; j < current_chunk_size; j++) {
+            bool is_last = (i + j == tokens_list.size() - 1);
+            common_batch_add(batch, tokens_list[i + j], tks_processed++, {0}, is_last);
         }
 
-        if (llama_encode(ctx, batch) != 0) {
-            fprintf(stderr, "Encoding failed...\n");
-            l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Encode failed", nullptr);
+        // Set logits only for the last token of the final chunk
+        if (i + current_chunk_size >= tokens_list.size()) {
+            batch.logits[batch.n_tokens - 1] = true;
+        }
+
+        // Decode this chunk
+        if (llama_decode(ctx, batch) != 0) {
+            l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Decode failed for chunk", nullptr);
             return 1;
         }
 
-        llama_token decoder_start_token_id = llama_model_decoder_start_token(model);
-        if (decoder_start_token_id == -1) {
-            decoder_start_token_id = llama_token_bos(model);
-        }
-
-        fprintf(stderr, "Adding decoder start token...\n");
-        common_batch_clear(batch);
-        common_batch_add(batch, decoder_start_token_id, 0, {0}, false);
-    } else {
-        // Regular model handling
-        fprintf(stderr, "Adding tokens to batch...\n");
-        for (size_t i = 0; i < tokens_list.size(); i++) {
-            common_batch_add(batch, tokens_list[i], i, {0}, false);
-            tks_processed++;
-        }
+        fprintf(stderr, "Processed chunk %zu/%zu (tokens %zu-%zu)\n", 
+                (i / chunk_size) + 1, 
+                (tokens_list.size() + chunk_size - 1) / chunk_size,
+                i, 
+                i + current_chunk_size - 1);
     }
 
+    // Add debug logging after final decode
     if (batch.n_tokens > 0) {
-        fprintf(stderr, "Setting logit for last token...\n");
-        batch.logits[batch.n_tokens - 1] = true;
-    }
-
-    if (llama_decode(ctx, batch) != 0) {
-        fprintf(stderr, "Decoding failed...\n");
-        l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Decode failed", nullptr);
-        return 1;
+        float* logits = llama_get_logits_ith(ctx, batch.n_tokens - 1);
+        if (logits) {
+            float max_logit = -INFINITY;
+            for (int i = 0; i < llama_n_vocab(model); i++) {
+                if (logits[i] > max_logit) {
+                    max_logit = logits[i];
+                }
+            }
+            fprintf(stderr, "Initial decode completed. Max logit: %f\n", max_logit);
+        }
     }
 
     return 0;
+}
+
+std::string clean_token_text(const char* raw_text) {
+    if (!raw_text) return "";
+    
+    std::string text(raw_text);
+    std::string result;
+    
+    // Skip certain special tokens entirely
+    if (text == "<|endoftext|>" || text == "<s>" || text == "" || 
+        text == "<pad>" || text == "<unk>" || text == "âĢĶ") {
+        return "";
+    }
+    
+    // Process the text character by character
+    for (size_t i = 0; i < text.length();) {
+        // Handle Ġ (Unicode character that represents space before word)
+        if ((unsigned char)text[i] == 0xC4 && i + 1 < text.length() && (unsigned char)text[i + 1] == 0xA0) {
+            result += ' ';  // Replace Ġ with space
+            i += 2;  // Skip both bytes of Ġ
+            continue;
+        }
+        
+        // Handle ▁ (LOWER ONE EIGHTH BLOCK - another space marker)
+        if ((unsigned char)text[i] == 0xE2 && i + 2 < text.length() && 
+            (unsigned char)text[i + 1] == 0x96 && (unsigned char)text[i + 2] == 0x81) {
+            result += ' ';  // Replace ▁ with space
+            i += 3;  // Skip all three bytes of ▁
+            continue;
+        }
+        
+        // Handle Ċ (Unicode character for newline)
+        if ((unsigned char)text[i] == 0xC4 && i + 1 < text.length() && (unsigned char)text[i + 1] == 0x82) {
+            result += '\n';  // Replace Ċ with newline
+            i += 2;  // Skip both bytes of Ċ
+            continue;
+        }
+
+        // Handle âĢĶ (horizontal ellipsis)
+        if ((unsigned char)text[i] == 0xC3 && i + 2 < text.length() && 
+            (unsigned char)text[i + 1] == 0xA2 && (unsigned char)text[i + 2] == 0xC5) {
+            result += "...";  // Replace with standard ellipsis
+            i += 3;  // Skip all bytes of âĢĶ
+            continue;
+        }
+        
+        // Copy regular characters
+        result += text[i];
+        i++;
+    }
+    
+    return result;
 }
 
 extern "C" char* llama_next() {
@@ -234,61 +371,109 @@ extern "C" char* llama_next() {
         return nullptr;
     }
 
-    auto n_vocab = llama_n_vocab(model);
-    auto* logits = llama_get_logits_ith(ctx, batch.n_tokens - 1);
-    
+    // Get logits for the last token
+    float* logits = llama_get_logits_ith(ctx, batch.n_tokens - 1);
     if (!logits) {
         l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Failed to get logits", nullptr);
         return nullptr;
     }
 
+    const int n_vocab = llama_n_vocab(model);
+    
+    // Apply temperature
+    if (params.temperature > 0) {
+        for (int i = 0; i < n_vocab; i++) {
+            logits[i] /= params.temperature;
+        }
+    }
+
+    // Convert logits to probabilities with softmax
+    float max_logit = -INFINITY;
+    for (int i = 0; i < n_vocab; i++) {
+        if (logits[i] > max_logit) {
+            max_logit = logits[i];
+        }
+    }
+
+    std::vector<float> probs(n_vocab);
+    float sum = 0.0f;
+    
+    for (int i = 0; i < n_vocab; i++) {
+        probs[i] = expf(logits[i] - max_logit);
+        sum += probs[i];
+    }
+
+    // Normalize probabilities
+    for (int i = 0; i < n_vocab; i++) {
+        probs[i] /= sum;
+    }
+
+    // Sample from distribution
+    float r = (float)rand() / (float)RAND_MAX;
+    llama_token new_token_id = 0;
+    float cumsum = 0.0f;
+
+    for (int i = 0; i < n_vocab; i++) {
+        cumsum += probs[i];
+        if (r < cumsum) {
+            new_token_id = i;
+            break;
+        }
+    }
+
+    fprintf(stderr, "First 5 logits: %f, %f, %f, %f, %f\n", 
+            logits[0], logits[1], logits[2], logits[3], logits[4]);
+    fprintf(stderr, "Selected token %d with probability %f\n", new_token_id, probs[new_token_id]);
+
+    // Check if the token is an EOS token
+    if (new_token_id == llama_token_eos(model)) {
+        fprintf(stderr, "End of sequence token encountered\n");
+        return nullptr;
+    }
+
     char* token = (char*)malloc(MAX_TOKEN_LEN);
     if (!token) {
-        l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Memory allocation failed", nullptr);
+        l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Failed to allocate token memory", nullptr);
         return nullptr;
     }
 
-    // Initialize sampler chain
-    auto sparams = llama_sampler_chain_default_params();
-    llama_sampler* smpl = llama_sampler_chain_init(sparams);
-    
-    // Add sampling strategies
-    llama_sampler_chain_add(smpl, llama_sampler_init_top_k(40));     // Limit to top 40 tokens
-    llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.95f, 1)); // Keep tokens with cumulative probability <= 0.95
-    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.8f));    // Temperature for controlling randomness
-    llama_sampler_chain_add(smpl, llama_sampler_init_dist(0));       // Random seed for reproducibility
-
-    // Sample the next token using the sampler chain
-    const llama_token new_token_id = llama_sampler_sample(smpl, ctx, batch.n_tokens - 1);
-    llama_sampler_free(smpl);
-
-    // Check for end of generation
-    if (llama_token_is_eog(model, new_token_id)) {
-        free(token);
-        return nullptr;
+    // Try getting the token string directly from llama
+    const char* token_str = llama_token_get_text(model, new_token_id);
+    if (token_str) {
+        fprintf(stderr, "Raw token text: '%s'\n", token_str);
+        std::string cleaned = clean_token_text(token_str);
+        fprintf(stderr, "Cleaned token text: '%s'\n", cleaned.c_str());
+        strncpy(token, cleaned.c_str(), MAX_TOKEN_LEN - 1);
+        token[MAX_TOKEN_LEN - 1] = '\0';
+    } else {
+        // Fallback to token_to_piece if get_text fails
+        char piece[MAX_TOKEN_LEN];
+        int token_len = llama_token_to_piece(model, new_token_id, piece, sizeof(piece) - 1, 0, false);
+        
+        fprintf(stderr, "Token to piece conversion returned length: %d\n", token_len);
+        
+        if (token_len <= 0) {
+            l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Token conversion failed", nullptr);
+            free(token);
+            return nullptr;
+        }
+        
+        piece[token_len] = '\0';
+        std::string cleaned = clean_token_text(piece);
+        strncpy(token, cleaned.c_str(), MAX_TOKEN_LEN - 1);
+        token[MAX_TOKEN_LEN - 1] = '\0';
     }
 
-    // Convert token to string
-    char piece[MAX_TOKEN_LEN];
-    if (llama_token_to_piece(llama_get_model(ctx), new_token_id, piece, sizeof(piece), 0, false) < 0) {
-        free(token);
-        return nullptr;
-    }
-
-    strncpy(token, piece, MAX_TOKEN_LEN - 1);
-    token[MAX_TOKEN_LEN - 1] = '\0';
     tks_processed++;
 
     // Prepare next batch
     llama_batch_free(batch);
     batch = llama_batch_init(BATCH_SIZE, 0, 1);
-    
-    // Add the new token to the batch
-    common_batch_add(batch, new_token_id, tks_processed, { 0 }, true);
+    common_batch_add(batch, new_token_id, tks_processed - 1, {0}, true);
+    batch.logits[batch.n_tokens - 1] = true;
 
-    // Decode the new batch
     if (llama_decode(ctx, batch) != 0) {
-        l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Failed to decode", nullptr);
+        l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Decode failed", nullptr);
         free(token);
         return nullptr;
     }
@@ -365,4 +550,10 @@ extern "C" void llama_stop() {
         model = nullptr;
     }
     llama_backend_free();
+}
+
+extern "C" void llama_set_temperature(float temp) {
+    if (temp >= 0.0f) {
+        params.temperature = temp;
+    }
 }

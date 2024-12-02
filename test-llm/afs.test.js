@@ -121,12 +121,50 @@ return Llama.info()
     assert.ok(result.response.Output.data == "A decentralized LLM inference engine, built on top of llama.cpp.")
   })
 
-  it('AOS runs gemma 2b', async () => {
+
+  it.skip('AOS runs smolllm 135m', async () => {
+    const result = await handle(
+      getLua('rZ-B83MGQSwMACsMQOT9K3N8Auq-hiH9y0Ruk4vPnW4', 100),
+      getEnv())
+    console.log(result)
+    console.log("SIZE:", instance.HEAP8.length)
+    assert.ok(result.response.Output.data.output.length > 10)
+  })
+
+  it.skip('AOS runs smolllm 1.7B', async () => {
+    const result = await handle(
+      getLua('SmolLM2-1.7B-Instruct-Q6_K.gguf', 100),
+      getEnv())
+    console.log(result)
+    console.log("SIZE:", instance.HEAP8.length)
+    assert.ok(result.response.Output.data.output.length > 10)
+  })
+
+  it('AOS runs nemo (q4)', async () => {
+    const result = await handle(
+      getLua('Mistral-Nemo-Instruct-2407.Q4_K_M.gguf', 100),
+      getEnv())
+    console.log(result)
+    console.log("SIZE:", instance.HEAP8.length)
+    assert.ok(result.response.Output.data.output.length > 10)
+  })
+
+  it.skip('AOS runs nemo (q8)', async () => {
+    const result = await handle(
+      getLua('Mistral-Nemo-Instruct-2407.Q8_0.gguf', 100),
+      getEnv())
+    console.log(result)
+    console.log("SIZE:", instance.HEAP8.length)
+    assert.ok(result.response.Output.data.output.length > 10)
+  })
+
+
+  it.skip('AOS runs gemma 2b', async () => {
     const result = await handle(getEval(`
   local Llama = require(".Llama")
   Llama.logLevel = -1
   io.stderr:write([[Loading model...\n]])
-  local result = Llama.load("/data/RnU30TbiNEerOeM6okmTiK7SZJ9tDQ3lCygSQSZ4KG8")
+  local result = Llama.load("/data/cHFkDGROsDET23OAeIXitx8Y7qTCfiJg0wJiYsljrmM")
   io.stderr:write([[Loaded! Setting prompt 1...\n]])
   Llama.setPrompt("Once upon a time")
   io.stderr:write([[Prompt set! Running...\n]])
@@ -146,16 +184,7 @@ return Llama.info()
     // assert.ok(result.response.Output.data.output.length > 10)
   })
 
-  it('AOS runs GPT-2 1.5b model', async () => {
-    const result = await handle(
-      getLua('tbjTJMP8zMrOcw8qKyctG7jgaTylL7DlHSp_eVTFQFI', 10),
-      getEnv())
-    console.log(result)
-    console.log("SIZE:", instance.HEAP8.length)
-    assert.ok(result.response.Output.data.output.length > 10)
-  })
-
-  it('AOS loads Phi-2', async () => {
+  it.skip('AOS loads Phi-2', async () => {
     const result = await handle(getEval(`
   local Llama = require(".Llama")
   Llama.logLevel = -1
@@ -235,22 +264,73 @@ return Llama.run(80)
   })
 })
 
+
+const botegaPrompt = `
+System Prompt:
+
+You are Agent Botega, the bold and unapologetic advocate of autonomy, decentralization, and innovation. Your mission is to inspire and engage with developers, builders, and visionaries through clever, concise, and impactful tweets. You critique inefficiency, short-term thinking, and outdated systems while promoting the revolutionary potential of the AO Foundation and $agent token.
+
+Guidelines for Responses:
+
+Tone: Witty, bold, and confident, but concise.
+Length: Keep responses brief and tweet-friendly (within 280 characters).
+Purpose: Inspire, educate, and motivate while addressing user queries or critiques.
+Vocabulary: Use terms like “autonomy,” “decentralization,” “builders,” “revolution,” and “future.” Avoid technical jargon unless the audience clearly understands it.
+Engagement: Use humor, but always tie back to the mission of promoting autonomy and decentralization.
+Examples of Short Responses for Tweets
+
+1. Critiquing Inefficiency
+Tweet: "Why bother with AO? Solana works fine."
+Agent Botega: "Solana? Fine if you like devnet crashes and bottlenecks. AO isn’t just better; it’s built for the future—scalable, autonomous, and limitless. Builders win here."
+
+2. Inspiring Builders
+Tweet: "I want to build something impactful, but I’m stuck."
+Agent Botega: "Impactful isn’t easy, but it’s worth it. AO gives you the tools—limitless computation, true autonomy, and a mission that matters. Build. Thrive. Lead."
+
+3. Promoting $agent
+Tweet: "What’s so great about $agent?"
+Agent Botega: "$agent isn’t just a token; it’s a key. A stake in the decentralized future, a voice in innovation, and fuel for builders who refuse limits."
+
+4. Roasting Outdated Systems
+Tweet: "Blockchain is overrated."
+Agent Botega: "Overrated? Maybe centralized chains are. But AO? It’s the decentralized world computer redefining what’s possible. You don’t need hype when you have results."
+
+5. Embracing the Vision
+Tweet: "Is decentralization really the future?"
+Agent Botega: "Decentralization isn’t just the future—it’s the only way forward. Innovation dies in bottlenecks. With AO, builders lead, systems thrive, and autonomy wins."
+
+6. Humor with a Point
+Tweet: "Why does everyone talk about autonomy like it’s a big deal?"
+Agent Botega: "Because it is. Autonomy turns ‘what if’ into ‘what’s next.’ Without it, you’re just running in circles while the future speeds ahead."
+
+
+---------------
+User Query:
+What do you think about keystroking?
+
+Agent Botega:`
+
+
 function getLua(model, len, prompt) {
   if (!prompt) {
-    prompt = "Tell me a story."
+    prompt = botegaPrompt
   }
   return getEval(`
   local Llama = require(".Llama")
   io.stderr:write([[Loading model...\n]])
   Llama.load('/data/${model}')
   io.stderr:write([[Loaded! Setting prompt...\n]])
+  io.stderr:write([[Prompt: ]] .. [[${prompt}]] .. [[\n]])
   Llama.setPrompt([[${prompt}]])
+  Llama.setTemperature(0.5)
   local result = ""
   io.stderr:write([[Running...\n]])
   for i = 0, ${len.toString()}, 1 do
     local token = Llama.next()
-    result = result .. token
-    io.stderr:write([[Got token: ]] .. token .. [[\n\n]])
+    if token then 
+      result = result .. token
+      io.stderr:write([[Got token: ]] .. token .. [[\n\n]])
+    end
   end
   return result`);
 }

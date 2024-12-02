@@ -11,6 +11,7 @@ char* llama_run(int len);
 char* llama_next();
 int llama_add(char* new_string);
 void llama_stop();
+void llama_set_temperature(float temp);
 
 #endif // LLAMA_RUN_H
 

@@ -54,6 +54,13 @@ static int l_llama_stop(lua_State *L) {
   return 0;
 }
 
+// Add this with the other function declarations
+static int l_llama_set_temperature(lua_State *L) {
+    float temp = (float)luaL_checknumber(L, 1);
+    llama_set_temperature(temp);
+    return 0;
+}
+
 // register function
 int luaopen_llama(lua_State *L) {
   static const luaL_Reg llama_funcs[] = {
@@ -63,6 +70,7 @@ int luaopen_llama(lua_State *L) {
       {"run", l_llama_run},
       {"next", l_llama_next},
       {"stop", l_llama_stop},
+      {"set_temperature", l_llama_set_temperature},
       {NULL, NULL}  // Sentinel to indicate end of array
   };
 

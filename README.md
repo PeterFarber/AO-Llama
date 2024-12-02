@@ -27,3 +27,6 @@ yarn test # or npm run test
 
 ### WASM-Metering
 Need to update the ao-loader with newest version
+
+### newest version
+in ggml-cpu.c delete everything behind the GGML_USE_OPENMP macros
