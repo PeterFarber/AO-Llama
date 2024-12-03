@@ -13,6 +13,10 @@ function Llama.setPrompt(prompt)
     Llama.backend.set_prompt(prompt)
 end
 
+function Llama.setTemperature(temp)
+    Llama.backend.set_temperature(temp)
+end
+
 function Llama.run(count)
     return Llama.backend.run(count)
 end

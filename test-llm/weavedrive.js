@@ -6,6 +6,8 @@ const CHUNK_SZ = 128 * MB
 const NOTIFY_SZ = 512 * MB
 
 module.exports = function weaveDrive(mod, FS) {
+  // override if env var is set
+  mod.ARWEAVE = process.env.ARWEAVE_GATEWAY_URL || mod.ARWEAVE
   return {
     reset(fd) {
       //console.log("WeaveDrive: Resetting fd: ", fd)
@@ -16,7 +18,7 @@ module.exports = function weaveDrive(mod, FS) {
     async create(id) {
       var properties = { isDevice: false, contents: null }
 
-      if(!await this.checkAdmissible(id)) {
+      if (!await this.checkAdmissible(id)) {
         console.log("WeaveDrive: Arweave ID is not admissable! ", id)
         return 0;
       }
@@ -44,32 +46,32 @@ module.exports = function weaveDrive(mod, FS) {
       const pathCategory = filename.split('/')[1];
       const id = filename.split('/')[2];
       console.log("JS: Opening ID: ", id);
-  
+
       if (pathCategory === 'data') {
-          if(FS.analyzePath(filename).exists) {
-              for(var i = 0; i < FS.streams.length; i++) {
-                  if(FS.streams[i].node.name === id) {
-                      //console.log("JS: Found file: ", filename, " fd: ", FS.streams[i].fd);
-                      return FS.streams[i].fd;
-                  }
-              }
-              console.log("JS: File not found: ", filename);
-              return 0;
+        if (FS.analyzePath(filename).exists) {
+          for (var i = 0; i < FS.streams.length; i++) {
+            if (FS.streams[i].node.name === id) {
+              //console.log("JS: Found file: ", filename, " fd: ", FS.streams[i].fd);
+              return FS.streams[i].fd;
+            }
           }
-          else {
-              //console.log("JS: Open => Creating file: ", id);
-              const stream = await this.create(id);
-              //console.log("JS: Open => Created file: ", id, " fd: ", stream.fd);
-              return stream.fd;
-          }
+          console.log("JS: File not found: ", filename);
+          return 0;
+        }
+        else {
+          //console.log("JS: Open => Creating file: ", id);
+          const stream = await this.create(id);
+          //console.log("JS: Open => Created file: ", id, " fd: ", stream.fd);
+          return stream.fd;
+        }
       }
       else if (pathCategory === 'headers') {
-          console.log("Header access not implemented yet.");
-          return 0;
+        console.log("Header access not implemented yet.");
+        return 0;
       }
       else {
-          console.log("JS: Invalid path category: ", pathCategory);
-          return 0;
+        console.log("JS: Invalid path category: ", pathCategory);
+        return 0;
       }
     },
 
@@ -79,8 +81,8 @@ module.exports = function weaveDrive(mod, FS) {
       var dst_ptr = Number(raw_dst_ptr)
 
       var stream = 0;
-      for(var i = 0; i < FS.streams.length; i++) {
-        if(FS.streams[i].fd === fd) {
+      for (var i = 0; i < FS.streams.length; i++) {
+        if (FS.streams[i].fd === fd) {
           stream = FS.streams[i]
         }
       }
@@ -93,7 +95,7 @@ module.exports = function weaveDrive(mod, FS) {
       to_read -= bytes_read
 
       // Return if we have satisfied the request
-      if(to_read === 0) {
+      if (to_read === 0) {
         //console.log("WeaveDrive: Satisfied request with cache. Returning...")
         return bytes_read
       }
@@ -104,10 +106,10 @@ module.exports = function weaveDrive(mod, FS) {
       //console.log("WeaveDrive: fd: ", fd, " Read length: ", to_read, " Reading ahead:", to - to_read - stream.position)
 
       // Fetch with streaming
-      const response = await fetch(`${mod.ARWEAVE}/${stream.node.name}`, { 
-          method: "GET",
-          redirect: "follow",
-          headers: { "Range": `bytes=${stream.position}-${to}` } 
+      const response = await fetch(`${mod.ARWEAVE}/${stream.node.name}`, {
+        method: "GET",
+        redirect: "follow",
+        headers: { "Range": `bytes=${stream.position}-${to}` }
       });
 
       const reader = response.body.getReader()
@@ -118,53 +120,53 @@ module.exports = function weaveDrive(mod, FS) {
 
       try {
         while (true) {
-            const { done, value: chunk_bytes } = await reader.read();
-            if (done) break;
-            // Update the number of downloaded bytes to be _all_, not just the write length
-            downloaded_bytes += chunk_bytes.length
-            bytes_until_cache -= chunk_bytes.length
-            bytes_until_notify -= chunk_bytes.length
-    
-            // Write bytes from the chunk and update the pointer if necessary
-            const write_length = Math.min(chunk_bytes.length, to_read);
-            if(write_length > 0) {
-              //console.log("WeaveDrive: Writing: ", write_length, " bytes to: ", dst_ptr)
-              mod.HEAP8.set(chunk_bytes.subarray(0, write_length), dst_ptr)
-              dst_ptr += write_length
-              bytes_read += write_length
-              stream.position += write_length
-              to_read -= write_length
-            }
+          const { done, value: chunk_bytes } = await reader.read();
+          if (done) break;
+          // Update the number of downloaded bytes to be _all_, not just the write length
+          downloaded_bytes += chunk_bytes.length
+          bytes_until_cache -= chunk_bytes.length
+          bytes_until_notify -= chunk_bytes.length
 
-            if(to_read == 0) {
-              // Add excess bytes to our cache
-              const chunk_to_cache = chunk_bytes.subarray(write_length)
-              //console.log("WeaveDrive: Cacheing excess: ", chunk_to_cache.length)
-              cache_chunks.push(chunk_to_cache)
-            }
+          // Write bytes from the chunk and update the pointer if necessary
+          const write_length = Math.min(chunk_bytes.length, to_read);
+          if (write_length > 0) {
+            //console.log("WeaveDrive: Writing: ", write_length, " bytes to: ", dst_ptr)
+            mod.HEAP8.set(chunk_bytes.subarray(0, write_length), dst_ptr)
+            dst_ptr += write_length
+            bytes_read += write_length
+            stream.position += write_length
+            to_read -= write_length
+          }
 
-            if(bytes_until_cache <= 0) {
-              console.log("WeaveDrive: Chunk size reached. Compressing cache...")
-              stream.node.cache = this.addChunksToCache(stream.node.cache, cache_chunks)
-              cache_chunks = []
-              bytes_until_cache = CHUNK_SZ
-            }
+          if (to_read == 0) {
+            // Add excess bytes to our cache
+            const chunk_to_cache = chunk_bytes.subarray(write_length)
+            //console.log("WeaveDrive: Cacheing excess: ", chunk_to_cache.length)
+            cache_chunks.push(chunk_to_cache)
+          }
 
-            if(bytes_until_notify <= 0) {
-              console.log("WeaveDrive: Downloaded: ", downloaded_bytes / stream.node.total_size * 100, "%")
-              bytes_until_notify = NOTIFY_SZ
-            }
+          if (bytes_until_cache <= 0) {
+            console.log("WeaveDrive: Chunk size reached. Compressing cache...")
+            stream.node.cache = this.addChunksToCache(stream.node.cache, cache_chunks)
+            cache_chunks = []
+            bytes_until_cache = CHUNK_SZ
+          }
+
+          if (bytes_until_notify <= 0) {
+            console.log("WeaveDrive: Downloaded: ", downloaded_bytes / stream.node.total_size * 100, "%")
+            bytes_until_notify = NOTIFY_SZ
+          }
         }
       } catch (error) {
-          console.error("WeaveDrive: Error reading the stream: ", error)
+        console.error("WeaveDrive: Error reading the stream: ", error)
       } finally {
-          reader.releaseLock()
+        reader.releaseLock()
       }
       // If we have no cache, or we have not satisfied the full request, we need to download the rest
       // Rebuild the cache from the new cache chunks
       stream.node.cache = this.addChunksToCache(stream.node.cache, cache_chunks)
 
-      if(bytes_read > MB) {
+      if (bytes_read > MB) {
         console.log(`Downloaded ${bytes_read}\n`)
       }
 
@@ -184,7 +186,7 @@ module.exports = function weaveDrive(mod, FS) {
     // Readahead cache functions
     readFromCache(stream, dst_ptr, length) {
       // Check if the cache has been invalidated by a seek
-      if(stream.lastReadPosition !== stream.position) {
+      if (stream.lastReadPosition !== stream.position) {
         //console.log("WeaveDrive: Invalidating cache for fd: ", stream.fd, " Current pos: ", stream.position, " Last read pos: ", stream.lastReadPosition)
         stream.node.cache = new Uint8Array(0)
         return 0
@@ -208,7 +210,7 @@ module.exports = function weaveDrive(mod, FS) {
       // Load the cache chunks into the new cache
       var current_offset = old_cache.length;
       for (let chunk of chunks) {
-        if(current_offset < new_cache_length) {
+        if (current_offset < new_cache_length) {
           new_cache.set(chunk.subarray(0, new_cache_length - current_offset), current_offset);
           current_offset += chunk.length;
         }
@@ -218,7 +220,7 @@ module.exports = function weaveDrive(mod, FS) {
 
     // General helpder functions
     async checkAdmissible(ID) {
-      if(mod.mode && mod.mode == "test") {
+      if (mod.mode && mod.mode == "test") {
         // CAUTION: If the module is initiated with `mode = test` we don't check availability.
         return true
       }
@@ -229,8 +231,8 @@ module.exports = function weaveDrive(mod, FS) {
       const moduleHasWeaveDrive = moduleExtensions.includes("WeaveDrive")
       const processExtensions = this.getTagValues("Extension", mod.module.tags)
       const processHasWeaveDrive = moduleHasWeaveDrive || processExtensions.includes("WeaveDrive")
-      
-      if(!processHasWeaveDrive) {
+
+      if (!processHasWeaveDrive) {
         console.log("WeaveDrive: Process tried to call WeaveDrive, but extension not set!")
         return false
       }
@@ -241,13 +243,13 @@ module.exports = function weaveDrive(mod, FS) {
       const moduleMode = mod.module.tags['Availability-Type']
         ? mod.module.tags['Availability-Type']
         : "Assignments" // Default to assignments
-      
+
       // Now check the process's spawn item. These settings override Module item settings.
       const processMode = mod.spawn.tags['Availability-Type']
         ? mod.spawn.tags['Availability-Type']
         : moduleMode
-      
-      if(!modes.includes(processMode)) {
+
+      if (!modes.includes(processMode)) {
         throw `Unsupported WeaveDrive mode: ${processMode}`
       }
 
@@ -278,12 +280,12 @@ module.exports = function weaveDrive(mod, FS) {
             }
           }
         }`)
-      
-      if(assignmentsHaveID) {
+
+      if (assignmentsHaveID) {
         return true
       }
 
-      if(processMode == "Individual") {
+      if (processMode == "Individual") {
         const individualsHaveID = await this.queryHasResult(
           `query {
             transactions(
@@ -306,8 +308,8 @@ module.exports = function weaveDrive(mod, FS) {
               }
             }
           }`)
-        
-        if(individualsHaveID) {
+
+        if (individualsHaveID) {
           return true
         }
       }
@@ -318,7 +320,7 @@ module.exports = function weaveDrive(mod, FS) {
       // execution failed on this message. The CU must also not continue to execute further
       // messages on this process. Attesting to them would be slashable, as the state would
       // be incorrect.
-      if(processMode == "Library") {
+      if (processMode == "Library") {
         throw "This WeaveDrive implementation does not support Library attestations yet!"
       }
 
@@ -327,8 +329,8 @@ module.exports = function weaveDrive(mod, FS) {
 
     getTagValues(key, tags) {
       var values = []
-      for(i = 0; i < tags.length; i++) {
-        if(tags[i].key == key) {
+      for (i = 0; i < tags.length; i++) {
+        if (tags[i].key == key) {
           values.push(tags[i].value)
         }
       }

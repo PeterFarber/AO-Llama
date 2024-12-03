@@ -1,5 +1,5 @@
-emcc llama-bindings.c -c -sMEMORY64=1 -Wno-experimental -o llama-bindings.o /lua-5.3.4/src/liblua.a -I/lua-5.3.4/src -I/llamacpp/ -I/llamacpp/common
-emcc llama-run.cpp -c -sMEMORY64=1 -Wno-experimental -o llama-run.o -I/llamacpp/ -I/llamacpp/common
+emcc llama-bindings.c -c -sMEMORY64=1 -msimd128 -O3 -fno-rtti -fno-exceptions -Wno-experimental -o llama-bindings.o /lua-5.3.4/src/liblua.a -I/lua-5.3.4/src -I/llamacpp/ -I/llamacpp/common -I/llamacpp/spm-headers -I/llamacpp/ggml/include
+emcc llama-run.cpp -c -sMEMORY64=1 -msimd128 -O3 -fno-rtti -fno-exceptions -Wno-experimental -o llama-run.o -I/lua-5.3.4/src -I/llamacpp/ -I/llamacpp/common -I/llamacpp/spm-headers -I/llamacpp/ggml/include
 
 emar rcs libaollama.so llama-bindings.o llama-run.o
 
