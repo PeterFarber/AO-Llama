@@ -15,16 +15,23 @@
 #include <algorithm>
 
 #define CTX_SIZE 8192
-#define BATCH_SIZE 512
+#define BATCH_SIZE 2048
 #define MAX_TOKEN_LEN 256
-#define DEFAULT_TEMP 0.8f
+#define DEBUG_MODE 0
+
+#define DEBUG_PRINT(...) do { if (DEBUG_MODE) fprintf(stderr, __VA_ARGS__); } while (0)
 
 struct params_struct {
     std::string model;
     std::string prompt;
     int n_threads = 1;
     int n_threads_batch = 1;
-    float temperature = DEFAULT_TEMP;
+    float temperature = 0.8f;
+    float top_p = 0.95f;
+    int top_k = 40;
+    float repeat_penalty = 1.0f;
+    int repeat_last_n = 64;
+    float min_p = 0.05f;
 };
 
 // Global variables
@@ -74,14 +81,14 @@ void initialize_special_tokens(llama_model* model) {
         for (const auto& [pattern, replacement] : token_mappings) {
             if (token_text == pattern) {  // Only exact matches
                 special_tokens.push_back({token_id, token_text, replacement});
-                fprintf(stderr, "Found special token: '%s' (id: %d) -> '%s'\n", 
+                DEBUG_PRINT("Found special token: '%s' (id: %d) -> '%s'\n", 
                         token_text.c_str(), token_id, replacement.c_str());
                 break;
             }
         }
     }
 
-    fprintf(stderr, "Initialized %zu special tokens\n", special_tokens.size());
+    DEBUG_PRINT("Initialized %zu special tokens\n", special_tokens.size());
 }
 
 // Helper function to safely free resources
@@ -204,7 +211,7 @@ void llama_reset_context() {
     cleanup_resources();
     tks_processed = 0;
 
-    fprintf(stderr, "Initializing new batch...\n");
+    DEBUG_PRINT("Initializing new batch...\n");
     batch = llama_batch_init(BATCH_SIZE, 0, 1);
     
     llama_context_params ctx_params = llama_context_default_params();
@@ -220,7 +227,7 @@ void llama_reset_context() {
     ctx_params.rope_freq_base = 10000.0f;
     ctx_params.rope_freq_scale = 1.0f;
 
-    fprintf(stderr, "Creating new context (n_ctx: %d, n_threads: %d)...\n", 
+    DEBUG_PRINT("Creating new context (n_ctx: %d, n_threads: %d)...\n", 
             ctx_params.n_ctx, ctx_params.n_threads);
     
     ctx = llama_new_context_with_model(model, ctx_params);
@@ -230,7 +237,7 @@ void llama_reset_context() {
         return;
     }
 
-    fprintf(stderr, "Context created successfully\n");
+    DEBUG_PRINT("Context created successfully\n");
 }
 
 extern "C" int llama_set_prompt(char* prompt) {
@@ -314,46 +321,89 @@ std::string clean_token_text(const char* raw_text) {
     std::string text(raw_text);
     std::string result;
     
-    // Skip certain special tokens entirely
+    // Expanded list of tokens to skip
     if (text == "<|endoftext|>" || text == "<s>" || text == "" || 
-        text == "<pad>" || text == "<unk>" || text == "âĢĶ") {
+        text == "<pad>" || text == "<unk>" || text == "âĢĶ" ||
+        text == "ðŁĮĲðŁĴ" || text == "ðŁ" || text == "Ĳ" || 
+        text == "Ĵ" || text == "Į") {
         return "";
+    }
+
+    // First check for exact matches in special_tokens
+    for (const auto& special : special_tokens) {
+        if (text == special.raw_text) {
+            return special.replacement;
+        }
     }
     
     // Process the text character by character
     for (size_t i = 0; i < text.length();) {
-        // Handle Ġ (Unicode character that represents space before word)
-        if ((unsigned char)text[i] == 0xC4 && i + 1 < text.length() && (unsigned char)text[i + 1] == 0xA0) {
-            result += ' ';  // Replace Ġ with space
-            i += 2;  // Skip both bytes of Ġ
-            continue;
+        bool handled = false;
+
+        // Check for multi-byte special characters
+        for (const auto& special : special_tokens) {
+            if (text.compare(i, special.raw_text.length(), special.raw_text) == 0) {
+                result += special.replacement;
+                i += special.raw_text.length();
+                handled = true;
+                break;
+            }
         }
-        
-        // Handle ▁ (LOWER ONE EIGHTH BLOCK - another space marker)
-        if ((unsigned char)text[i] == 0xE2 && i + 2 < text.length() && 
-            (unsigned char)text[i + 1] == 0x96 && (unsigned char)text[i + 2] == 0x81) {
-            result += ' ';  // Replace ▁ with space
-            i += 3;  // Skip all three bytes of ▁
-            continue;
-        }
-        
-        // Handle Ċ (Unicode character for newline)
-        if ((unsigned char)text[i] == 0xC4 && i + 1 < text.length() && (unsigned char)text[i + 1] == 0x82) {
-            result += '\n';  // Replace Ċ with newline
-            i += 2;  // Skip both bytes of Ċ
+
+        if (handled) continue;
+
+        // Handle emoji and other Unicode sequences
+        if ((unsigned char)text[i] == 0xF0 && i + 3 < text.length()) {
+            // Skip 4-byte Unicode sequences (including emojis)
+            i += 4;
             continue;
         }
 
-        // Handle âĢĶ (horizontal ellipsis)
-        if ((unsigned char)text[i] == 0xC3 && i + 2 < text.length() && 
-            (unsigned char)text[i + 1] == 0xA2 && (unsigned char)text[i + 2] == 0xC5) {
-            result += "...";  // Replace with standard ellipsis
-            i += 3;  // Skip all bytes of âĢĶ
+        // Handle remaining special cases
+        if ((unsigned char)text[i] == 0xC4 && i + 1 < text.length()) {
+            if ((unsigned char)text[i + 1] == 0xA0) {  // Ġ
+                result += ' ';
+                i += 2;
+                continue;
+            } else if ((unsigned char)text[i + 1] == 0x82) {  // Ċ
+                result += '\n';
+                i += 2;
+                continue;
+            } else if ((unsigned char)text[i + 1] == 0xAE ||  // Į
+                      (unsigned char)text[i + 1] == 0xB2 ||  // Ĳ
+                      (unsigned char)text[i + 1] == 0xB4) {  // Ĵ
+                i += 2;
+                continue;
+            }
+        }
+        
+        // Handle ▁ (LOWER ONE EIGHTH BLOCK)
+        if ((unsigned char)text[i] == 0xE2 && i + 2 < text.length() && 
+            (unsigned char)text[i + 1] == 0x96 && (unsigned char)text[i + 2] == 0x81) {
+            result += ' ';
+            i += 3;
             continue;
         }
         
-        // Copy regular characters
-        result += text[i];
+        // Handle âĢĶ (horizontal ellipsis)
+        if ((unsigned char)text[i] == 0xC3 && i + 2 < text.length() && 
+            (unsigned char)text[i + 1] == 0xA2 && (unsigned char)text[i + 2] == 0xC5) {
+            result += "...";
+            i += 3;
+            continue;
+        }
+
+        // Handle ðŁ sequences
+        if ((unsigned char)text[i] == 0xC3 && i + 1 < text.length() && 
+            (unsigned char)text[i + 1] == 0xB0) {
+            i += 2;  // Skip ðŁ
+            continue;
+        }
+        
+        // Only add printable ASCII characters
+        if ((unsigned char)text[i] >= 32 && (unsigned char)text[i] <= 126) {
+            result += text[i];
+        }
         i++;
     }
     
@@ -380,10 +430,85 @@ extern "C" char* llama_next() {
 
     const int n_vocab = llama_n_vocab(model);
     
+    // Apply repetition penalty
+    if (params.repeat_penalty != 1.0f && params.repeat_last_n > 0) {
+        std::vector<llama_token> last_tokens(params.repeat_last_n);
+        int n_tokens = std::min(params.repeat_last_n, tks_processed);
+        
+        for (int i = 0; i < n_tokens; i++) {
+            last_tokens[i] = batch.token[batch.n_tokens - n_tokens + i];
+        }
+        
+        for (int i = 0; i < n_tokens; i++) {
+            logits[last_tokens[i]] /= params.repeat_penalty;
+        }
+    }
+
     // Apply temperature
     if (params.temperature > 0) {
         for (int i = 0; i < n_vocab; i++) {
             logits[i] /= params.temperature;
+        }
+    }
+
+    // Apply top_k sampling
+    if (params.top_k > 0) {
+        std::vector<std::pair<float, llama_token>> candidates;
+        candidates.reserve(n_vocab);
+        for (int i = 0; i < n_vocab; i++) {
+            candidates.push_back(std::make_pair(logits[i], i));
+        }
+        
+        std::partial_sort(candidates.begin(), 
+                         candidates.begin() + params.top_k, 
+                         candidates.end(),
+                         [](const auto& a, const auto& b) { return a.first > b.first; });
+        
+        for (int i = params.top_k; i < n_vocab; i++) {
+            logits[candidates[i].second] = -INFINITY;
+        }
+    }
+
+    // Apply top_p sampling (nucleus sampling)
+    if (params.top_p > 0.0f && params.top_p < 1.0f) {
+        std::vector<std::pair<float, llama_token>> candidates;
+        candidates.reserve(n_vocab);
+        for (int i = 0; i < n_vocab; i++) {
+            candidates.push_back(std::make_pair(logits[i], i));
+        }
+        
+        std::sort(candidates.begin(), candidates.end(),
+                 [](const auto& a, const auto& b) { return a.first > b.first; });
+        
+        // Calculate max_logit first
+        float max_logit = candidates[0].first;
+        
+        float cumsum = 0.0f;
+        for (int i = 0; i < n_vocab; i++) {
+            cumsum += expf(candidates[i].first - max_logit);
+            if (cumsum > params.top_p) {
+                for (int j = i + 1; j < n_vocab; j++) {
+                    logits[candidates[j].second] = -INFINITY;
+                }
+                break;
+            }
+        }
+    }
+
+    // After top_p sampling, add min_p:
+    if (params.min_p > 0.0f) {
+        float max_l = -INFINITY;
+        for (int i = 0; i < n_vocab; i++) {
+            if (logits[i] > max_l) {
+                max_l = logits[i];
+            }
+        }
+        
+        const float min_logit = max_l - logf(1.0f / params.min_p);
+        for (int i = 0; i < n_vocab; i++) {
+            if (logits[i] < min_logit) {
+                logits[i] = -INFINITY;
+            }
         }
     }
 
@@ -421,13 +546,13 @@ extern "C" char* llama_next() {
         }
     }
 
-    fprintf(stderr, "First 5 logits: %f, %f, %f, %f, %f\n", 
+    DEBUG_PRINT("First 5 logits: %f, %f, %f, %f, %f\n", 
             logits[0], logits[1], logits[2], logits[3], logits[4]);
-    fprintf(stderr, "Selected token %d with probability %f\n", new_token_id, probs[new_token_id]);
+    DEBUG_PRINT("Selected token %d with probability %f\n", new_token_id, probs[new_token_id]);
 
     // Check if the token is an EOS token
     if (new_token_id == llama_token_eos(model)) {
-        fprintf(stderr, "End of sequence token encountered\n");
+        DEBUG_PRINT("End of sequence token encountered\n");
         return nullptr;
     }
 
@@ -440,9 +565,9 @@ extern "C" char* llama_next() {
     // Try getting the token string directly from llama
     const char* token_str = llama_token_get_text(model, new_token_id);
     if (token_str) {
-        fprintf(stderr, "Raw token text: '%s'\n", token_str);
+        DEBUG_PRINT("Raw token text: '%s'\n", token_str);
         std::string cleaned = clean_token_text(token_str);
-        fprintf(stderr, "Cleaned token text: '%s'\n", cleaned.c_str());
+        DEBUG_PRINT("Cleaned token text: '%s'\n", cleaned.c_str());
         strncpy(token, cleaned.c_str(), MAX_TOKEN_LEN - 1);
         token[MAX_TOKEN_LEN - 1] = '\0';
     } else {
@@ -450,7 +575,7 @@ extern "C" char* llama_next() {
         char piece[MAX_TOKEN_LEN];
         int token_len = llama_token_to_piece(model, new_token_id, piece, sizeof(piece) - 1, 0, false);
         
-        fprintf(stderr, "Token to piece conversion returned length: %d\n", token_len);
+        DEBUG_PRINT("Token to piece conversion returned length: %d\n", token_len);
         
         if (token_len <= 0) {
             l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Token conversion failed", nullptr);
@@ -556,4 +681,13 @@ extern "C" void llama_set_temperature(float temp) {
     if (temp >= 0.0f) {
         params.temperature = temp;
     }
+}
+
+extern "C" void llama_set_sampling_params(float temp, float top_p, int top_k, float repeat_penalty, int repeat_last_n, float min_p) {
+    if (temp >= 0.0f) params.temperature = temp;
+    if (top_p >= 0.0f && top_p <= 1.0f) params.top_p = top_p;
+    if (top_k >= 0) params.top_k = top_k;
+    if (repeat_penalty >= 0.0f) params.repeat_penalty = repeat_penalty;
+    if (repeat_last_n >= 0) params.repeat_last_n = repeat_last_n;
+    if (min_p >= 0.0f && min_p <= 1.0f) params.min_p = min_p;
 }

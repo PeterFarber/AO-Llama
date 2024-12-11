@@ -61,6 +61,17 @@ static int l_llama_set_temperature(lua_State *L) {
     return 0;
 }
 
+static int l_llama_set_sampling_params(lua_State *L) {
+    float temp = (float)luaL_checknumber(L, 1);
+    float top_p = (float)luaL_checknumber(L, 2);
+    int top_k = (int)luaL_checkinteger(L, 3);
+    float repeat_penalty = (float)luaL_checknumber(L, 4);
+    int repeat_last_n = (int)luaL_checkinteger(L, 5);
+    float min_p = (float)luaL_checknumber(L, 6);
+    llama_set_sampling_params(temp, top_p, top_k, repeat_penalty, repeat_last_n, min_p);
+    return 0;
+}
+
 // register function
 int luaopen_llama(lua_State *L) {
   static const luaL_Reg llama_funcs[] = {
@@ -71,6 +82,7 @@ int luaopen_llama(lua_State *L) {
       {"next", l_llama_next},
       {"stop", l_llama_stop},
       {"set_temperature", l_llama_set_temperature},
+      {"set_sampling_params", l_llama_set_sampling_params},
       {NULL, NULL}  // Sentinel to indicate end of array
   };
 

@@ -17,6 +17,10 @@ function Llama.setTemperature(temp)
     Llama.backend.set_temperature(temp)
 end
 
+function Llama.setSamplingParams(temp, top_p, top_k, repeat_penalty, repeat_last_n, min_p)
+    Llama.backend.set_sampling_params(temp, top_p, top_k, repeat_penalty, repeat_last_n, min_p)
+end
+
 function Llama.run(count)
     return Llama.backend.run(count)
 end
