@@ -211,6 +211,7 @@ function getLua(model, len, prompt) {
   io.stderr:write([[Loaded! Setting prompt...\n]])
   io.stderr:write([[Prompt: ]] .. [[${prompt}]] .. [[\n]])
   Llama.setPrompt([[${prompt}]])
+  --Llama.setSamplingParams(0.7, 0.1, 20, 1.3, 64, 0.1)
   local result = ""
   io.stderr:write([[Running...\n]])
   for i = 0, ${len.toString()}, 1 do
