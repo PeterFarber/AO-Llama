@@ -12,7 +12,9 @@ AO_IMAGE="p3rmaw3b/ao:0.1.4"
 
 EMXX_FLAGS="-msimd128 -O3 -flto -fno-rtti -Wno-experimental -mbulk-memory \
             -s MEMORY64=1 \
-            -s SUPPORT_LONGJMP=1"
+            -s SUPPORT_LONGJMP=1 \
+            -s USE_PTHREADS=1 \
+            -pthread"
 
 # Cleanup
 rm -rf aos/process/libs
@@ -48,7 +50,8 @@ sudo docker run --platform=linux/amd64 -v ${LLAMA_CPP_DIR}:/llamacpp ${AO_IMAGE}
     -DGGML_KOMPUTE=OFF \
     -DGGML_USE_OPENMP=OFF \
     -DLLAMA_OPENMP=OFF \
-    -DBUILD_SHARED_LIBS=OFF"
+    -DBUILD_SHARED_LIBS=OFF \
+    -DLLAMA_ENABLE_THREADS=ON"
 
 # Build the libraries
 sudo docker run --platform=linux/amd64 -v ${LLAMA_CPP_DIR}:/llamacpp ${AO_IMAGE} sh -c \

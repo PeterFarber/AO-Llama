@@ -5,7 +5,6 @@ emar rcs libaollama.so llama-bindings.o llama-run.o
 
 rm llama-bindings.o llama-run.o
 
-
 emcc stream-bindings.c -c -sMEMORY64=1 -o stream-bindings.o /lua-5.3.4/src/liblua.a -I/lua-5.3.4/src
 emcc stream.c -c -sMEMORY64=1 -o stream.o /lua-5.3.4/src/liblua.a -I/lua-5.3.4/src
 

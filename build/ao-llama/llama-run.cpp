@@ -26,8 +26,8 @@
 struct params_struct {
     std::string model;
     std::string prompt;
-    int n_threads = 1;
-    int n_threads_batch = 1;
+    int n_threads = 4;
+    int n_threads_batch = 4;
     float temperature = 0.8f;
     float top_p = 0.3f;
     int top_k = 30;
