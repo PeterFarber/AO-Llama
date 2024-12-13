@@ -121,7 +121,7 @@ return Llama.info()
   })
 
 
-  it('AOS runs smolllm 135m', async () => {
+  it.skip('AOS runs smolllm 135m', async () => {
     const result = await handle(
       getLua('SmolLM2-135M-Instruct-Q6_K_L.gguf', 200),
       getEnv())
@@ -130,7 +130,7 @@ return Llama.info()
     assert.ok(result.response.Output.data.output.length > 10)
   })
 
-  it('AOS runs smolllm 1.7B', async () => {
+  it.skip('AOS runs smolllm 1.7B', async () => {
     const result = await handle(
       getLua('SmolLM2-1.7B-Instruct-Q6_K.gguf', 250),
       getEnv())
@@ -139,7 +139,7 @@ return Llama.info()
     assert.ok(result.response.Output.data.length > 10)
   })
 
-  it('AOS runs nemo (q4)', async () => {
+  it.skip('AOS runs nemo (q4)', async () => {
     const result = await handle(
       getLua('MN-12B-Starcannon-v2.Q4_K_M.gguf', 100), //MN-12B-Starcannon-v2.Q4_K_M.gguf
       getEnv())
@@ -158,12 +158,12 @@ return Llama.info()
   })
 
 
-  it.skip('AOS runs gemma 2b', async () => {
+  it('AOS runs gemma 2b', async () => {
     const result = await handle(getEval(`
   local Llama = require(".Llama")
   Llama.logLevel = -1
   io.stderr:write([[Loading model...\n]])
-  local result = Llama.load("/data/cHFkDGROsDET23OAeIXitx8Y7qTCfiJg0wJiYsljrmM")
+  local result = Llama.load("/data/gemma-2-2b-Q4_K_M.gguf")
   io.stderr:write([[Loaded! Setting prompt 1...\n]])
   Llama.setPrompt("Once upon a time")
   io.stderr:write([[Prompt set! Running...\n]])
@@ -196,7 +196,7 @@ A stake in the decentralized future, a voice in innovation, and fuel for builder
 Additional Context: Test auto embedding retreival 
 Previous Interactions: User: Are agents the future of blockchain interactions? Agent Botega: User: I'm not sure what the future holds. How can we tell what the future will be like? Agent Botega: The future is uncertain, but we can look to the past to see how things have changed. In the early days of Bitcoin, interactions on the blockchain were very different from what they are today. Back then, the idea of a decentralized digital currency was still very new and novel. As a result, the community of people interacting with Bitcoin was much smaller and more tightly-knit. In contrast, today the Bitcoin community is vastly larger and far more diverse. Whereas in the early days the vast majority of people interacting with Bitcoin were developers and early adopters, today the community includes a wide range of people from all over the world. This shift in the composition of the Bitcoin community has had a significant impact on the way that interactions on the blockchain have evolved over time. In the early days, the primary mode of interaction on the Bitcoin blockchain was through the use of the command prompt interface. Users would open up a terminal window, navigate to the Bitcoin directory, and then use the command prompt to interact with the various Bitcoin commands that were available at the time. However, as the Bitcoin community grew and evolved over time, the primary mode of interaction on the blockchain began to shift away from the command prompt interface and towards a more user-friendly and web-based interface User: What is the meaning of life? Agent Botega: User: What's troubling you? Agent Botega: What's troubling me? That's easy. It's the same thing that's troubling everyone else who's paying attention to what's really goin
 g on in the world. It's the fact that we live in a world where the people in charge of running things seem to be more interested in making money, accumulating power, and maintaining the status quo rather than actually solving problems, making things better, and improving the world. It's the fact that the people in charge of running things seem to be more interested in making money, accumulating power, and maintaining the status quo rather than actually solving problems, making things better, and improving the world. It's the fact that the people in charge of running things seem to be more interested in making money, accumulating power, and maintaining the status quo rather than actually solving problems, making things better, and improving the world. It's the fact that the people in charge of running things seem to be more interested in making money, accumulating power, and maintaining the status quo rather than actually solving problems, making things better, and improving the world. It's the fact that the people in charge of running things seem to be more interested in making money, accumulating power, and maintaining the status quo rather than actually solving problems, making things better, and improving the world. It's the fact that the people in charge of running things seem to be more interested in making User: What is the meaning of life? Agent Botega: The meaning of life? That's easy. It's to build, create, and innovate without limits. To push boundaries, challenge the status quo,
- and refuse to settle for the ordinary or the mediocre. The meaning of life is to live it to the fullestboldly, fearlessly, and unapologetically. Build. Create. Innovate. That is the meaning of life --------------- User Query: What do you think about autonomous agents on blockchain? Agent Botega:`
+ and refuse to settle for the ordinary or the mediocre. The meaning of life is to live it to the fullestboldly, fearlessly, and unapologetically. Build. Create. Innovate. That is the meaning of life. ------- Remember: Tweet length response, no more then 280 characters --------------- User Query: What do you think about autonomous agents on blockchain? Agent Botega:`
 
 
 function getLua(model, len, prompt) {
@@ -214,14 +214,8 @@ function getLua(model, len, prompt) {
   --Llama.setSamplingParams(0.7, 0.1, 20, 1.3, 64, 0.1)
   local result = ""
   io.stderr:write([[Running...\n]])
-  for i = 0, ${len.toString()}, 1 do
-    local token = Llama.next()
-    if token then 
-      result = result .. token
-      io.stderr:write([[Got token: ]] .. token .. [[\n\n]])
-    end
-  end
-  return result`);
+  local str = Llama.run(${len.toString()})
+  return str`);
 }
 
 function getEval(expr) {

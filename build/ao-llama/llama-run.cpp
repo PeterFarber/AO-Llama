@@ -13,8 +13,9 @@
 #include <stdexcept>
 #include <thread>
 #include <algorithm>
-#include <cstring>   // for strncpy, strncat
+#include <cstring>   // for strncpy, etc.
 #include <limits>    // for INFINITY
+#include <random>    // for random sampling if desired
 
 #define CTX_SIZE 8192
 #define BATCH_SIZE 2048
@@ -28,15 +29,15 @@ struct params_struct {
     std::string prompt;
     int n_threads = 4;
     int n_threads_batch = 4;
-    float temperature = 0.8f;
-    float top_p = 0.3f;
-    int top_k = 30;
-    float repeat_penalty = 1.05f;
-    int repeat_last_n = 64;
-    float min_p = 0.02f;
+    float temperature = 0.7f;   
+    float top_p = 0.9f;         
+    int top_k = 40;             
+    float repeat_penalty = 1.1f;
+    int repeat_last_n = 64;     
+    float min_p = 0.00f;        
 };
 
-// Global variables
+
 static params_struct params;
 static llama_model* model = nullptr;
 static llama_batch batch = {};
@@ -81,7 +82,7 @@ void initialize_special_tokens(llama_model* model) {
             if (token_text == pattern) {
                 special_tokens.push_back({token_id, token_text, replacement});
                 DEBUG_PRINT("Found special token: '%s' (id: %d) -> '%s'\n", 
-                        token_text.c_str(), token_id, replacement.c_str());
+                            token_text.c_str(), token_id, replacement.c_str());
                 break;
             }
         }
@@ -106,18 +107,14 @@ std::vector<llama_token> tokenize(llama_context* ctx, const std::string& text, b
         return {};
     }
 
-    std::vector<llama_token> tokens;
-    tokens.resize(text.length() + (add_bos ? 1 : 0));
-
-    int n = llama_tokenize(
-        llama_get_model(ctx),
-        text.c_str(),
-        (int)text.length(),
-        tokens.data(),
-        (int)tokens.size(),
-        add_bos,
-        true
-    );
+    std::vector<llama_token> tokens(text.size() + (add_bos ? 1 : 0));
+    int n = llama_tokenize(llama_get_model(ctx),
+                           text.c_str(),
+                           (int)text.size(),
+                           tokens.data(),
+                           (int)tokens.size(),
+                           add_bos,
+                           true);
 
     if (n < 0) {
         l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Tokenization failed", nullptr);
@@ -126,55 +123,6 @@ std::vector<llama_token> tokenize(llama_context* ctx, const std::string& text, b
 
     tokens.resize(n);
     return tokens;
-}
-
-bool decode_helper(llama_context* ctx, llama_batch& batch, std::vector<float>& batch_logits, int n_batch, int n_vocab) {
-    if (!ctx || n_vocab <= 0 || n_batch <= 0) {
-        return false;
-    }
-
-    int prev_outputs = 0;
-    for (int i = 0; i < (int)batch.n_tokens; i += n_batch) {
-        const int n_tokens = std::min<int>(n_batch, batch.n_tokens - i);
-        
-        llama_batch batch_view = {
-            (int32_t)n_tokens,
-            batch.token    + i,
-            nullptr,
-            batch.pos      + i,
-            batch.n_seq_id + i,
-            batch.seq_id   + i,
-            batch.logits   + i,
-        };
-
-        if (llama_decode(ctx, batch_view) != 0) {
-            return false;
-        }
-
-        int n_outputs = 0;
-        for (int idx = 0; idx < n_tokens; ++idx) {
-            if (batch_view.logits && batch_view.logits[idx]) {
-                n_outputs++;
-            }
-        }
-
-        float* ctx_logits = llama_get_logits(ctx);
-        if (!ctx_logits) {
-            return false;
-        }
-
-        if ((size_t)prev_outputs + (size_t)n_outputs > batch_logits.size()) {
-            l_llama_on_log(GGML_LOG_LEVEL_ERROR, "batch_logits overflow", nullptr);
-            return false;
-        }
-
-        memcpy(batch_logits.data() + (size_t)prev_outputs * n_vocab, 
-               ctx_logits, 
-               (size_t)n_outputs * n_vocab * sizeof(float));
-
-        prev_outputs += n_outputs;
-    }
-    return true;
 }
 
 extern "C" int llama_load(char* model_path) {
@@ -230,18 +178,16 @@ void llama_reset_context() {
     llama_context_params ctx_params = llama_context_default_params();
     const int n_ctx_train = llama_n_ctx_train(model);
     ctx_params.n_ctx = std::min(CTX_SIZE, n_ctx_train);
-    
     ctx_params.n_threads = 1;
     ctx_params.n_threads_batch = 1;
     ctx_params.offload_kqv = true;
     ctx_params.embeddings = false;
-    
     ctx_params.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_LINEAR;
     ctx_params.rope_freq_base = 10000.0f;
     ctx_params.rope_freq_scale = 1.0f;
 
     DEBUG_PRINT("Creating new context (n_ctx: %d, n_threads: %d)...\n", 
-            ctx_params.n_ctx, ctx_params.n_threads);
+                ctx_params.n_ctx, ctx_params.n_threads);
     
     ctx = llama_new_context_with_model(model, ctx_params);
 
@@ -315,7 +261,7 @@ extern "C" int llama_set_prompt(char* prompt) {
     }
 
     if (batch.n_tokens > 0) {
-        float* logits = llama_get_logits_ith(ctx, batch.n_tokens - 1);
+        float* logits = llama_get_logits_ith(ctx, (int)batch.n_tokens - 1);
         if (logits) {
             float max_logit = -INFINITY;
             int vocab = llama_n_vocab(model);
@@ -333,22 +279,18 @@ extern "C" int llama_set_prompt(char* prompt) {
 
 std::string clean_token_text(const char* raw_text) {
     if (!raw_text) return "";
-    
     std::string text(raw_text);
     if (text.empty()) return "";
 
-    // Check for skipped tokens
     static const std::vector<std::string> skip_list = {
         "<|endoftext|>", "<s>", "", "<pad>", "<unk>", "âĢĶ", "ðŁĮĲðŁĴ", "ðŁ", "Ĳ", "Ĵ", "Į"
     };
-
     for (auto &sk : skip_list) {
         if (text == sk) {
             return "";
         }
     }
 
-    // Check special_tokens exact matches
     for (const auto& special : special_tokens) {
         if (text == special.raw_text) {
             return special.replacement;
@@ -359,8 +301,6 @@ std::string clean_token_text(const char* raw_text) {
     size_t i = 0;
     while (i < text.length()) {
         bool handled = false;
-
-        // Check multi-byte special tokens
         for (const auto& special : special_tokens) {
             size_t len = special.raw_text.size();
             if (i + len <= text.size() && text.compare(i, len, special.raw_text) == 0) {
@@ -372,9 +312,8 @@ std::string clean_token_text(const char* raw_text) {
         }
         if (handled) continue;
 
-        // Safe check for i+3
         if (i + 3 < text.length() && (unsigned char)text[i] == 0xF0) {
-            i += 4; // skip 4-byte sequences (emojis)
+            i += 4; // skip emoji/unicode sequences
             continue;
         }
 
@@ -390,7 +329,7 @@ std::string clean_token_text(const char* raw_text) {
                 continue;
             } else if (next_char == 0xAE || next_char == 0xB2 || next_char == 0xB4) {
                 i += 2;
-                continue; // skip these chars
+                continue;
             }
         }
 
@@ -469,7 +408,7 @@ extern "C" char* llama_next() {
                 last_tokens[i] = batch.token[batch.n_tokens - n_tokens + i];
             }
             for (auto tk : last_tokens) {
-                if (tk < n_vocab && tk >= 0) {
+                if (tk >= 0 && tk < n_vocab) {
                     logits[tk] /= params.repeat_penalty;
                 }
             }
@@ -483,96 +422,112 @@ extern "C" char* llama_next() {
         }
     }
 
+    // Create a candidate list
+    std::vector<std::pair<float,int>> candidates;
+    candidates.reserve(n_vocab);
+    for (int i = 0; i < n_vocab; i++) {
+        candidates.push_back({logits[i], i});
+    }
+
+    // Sort by logit descending
+    std::sort(candidates.begin(), candidates.end(),
+              [](const auto &a, const auto &b) { return a.first > b.first; });
+
     // Top-k filtering
     if (params.top_k > 0 && params.top_k < n_vocab) {
-        std::vector<std::pair<float,int>> candidates;
-        candidates.reserve(n_vocab);
-        for (int i = 0; i < n_vocab; i++) {
-            candidates.push_back({logits[i], i});
-        }
-        std::partial_sort(candidates.begin(), candidates.begin() + params.top_k, candidates.end(),
-                          [](auto &a, auto &b) {return a.first > b.first;});
-        for (int i = params.top_k; i < n_vocab; i++) {
-            int idx = candidates[i].second;
-            logits[idx] = -INFINITY;
-        }
+        candidates.resize(params.top_k);
     }
 
-    // Top-p filtering
-    if (params.top_p > 0.0f && params.top_p < 1.0f) {
-        std::vector<std::pair<float,int>> candidates;
-        candidates.reserve(n_vocab);
-        for (int i = 0; i < n_vocab; i++) {
-            candidates.push_back({logits[i], i});
-        }
-        std::sort(candidates.begin(), candidates.end(), [](auto &a, auto &b) { return a.first > b.first; });
-
-        float max_logit = candidates[0].first;
-        float cumsum = 0.0f;
-        for (int i = 0; i < n_vocab; i++) {
-            cumsum += expf(candidates[i].first - max_logit);
-            if (cumsum > params.top_p) {
-                // Invalidate all lower-ranked tokens
-                for (int j = i+1; j < n_vocab; j++) {
-                    logits[candidates[j].second] = -INFINITY;
-                }
-                break;
-            }
-        }
-    }
-
-    // Min_p filtering
-    if (params.min_p > 0.0f && params.min_p < 1.0f) {
-        float max_l = -INFINITY;
-        for (int i = 0; i < n_vocab; i++) {
-            if (logits[i] > max_l) max_l = logits[i];
-        }
-        float min_logit = max_l - logf(1.0f / params.min_p);
-        for (int i = 0; i < n_vocab; i++) {
-            if (logits[i] < min_logit) {
-                logits[i] = -INFINITY;
-            }
-        }
-    }
-
-    // Softmax
+    // Compute stable softmax on the truncated set
+    // Find max logit
     float max_logit = -INFINITY;
-    for (int i = 0; i < n_vocab; i++) {
-        if (logits[i] > max_logit) max_logit = logits[i];
+    for (auto &c : candidates) {
+        if (c.first > max_logit) max_logit = c.first;
     }
 
-    std::vector<float> probs(n_vocab, 0.0f);
     float sum = 0.0f;
-    for (int i = 0; i < n_vocab; i++) {
-        if (logits[i] != -INFINITY) {
-            probs[i] = expf(logits[i] - max_logit);
-            sum += probs[i];
-        } else {
-            probs[i] = 0.0f;
-        }
+    for (auto &c : candidates) {
+        float p = expf(c.first - max_logit);
+        c.first = p; // reuse 'first' to store probability
+        sum += p;
     }
 
-    if (sum == 0.0f) {
-        l_llama_on_log(GGML_LOG_LEVEL_ERROR, "No valid tokens to sample from", nullptr);
+    if (sum <= 0.0f) {
+        l_llama_on_log(GGML_LOG_LEVEL_ERROR, "No candidates after top-k", nullptr);
         return nullptr;
     }
 
-    for (int i = 0; i < n_vocab; i++) {
-        probs[i] /= sum;
+    // Normalize
+    for (auto &c : candidates) {
+        c.first /= sum;
     }
 
+    // Top-p filtering: remove tokens from the tail until sum of probabilities <= top_p
+    if (params.top_p > 0.0f && params.top_p < 1.0f) {
+        float cum_sum = 0.0f;
+        size_t cutoff = 0;
+        for (; cutoff < candidates.size(); cutoff++) {
+            cum_sum += candidates[cutoff].first;
+            if (cum_sum > params.top_p) {
+                cutoff++; // include current token
+                break;
+            }
+        }
+        if (cutoff < candidates.size()) {
+            candidates.resize(cutoff);
+        }
+    }
+
+    // min_p filtering: remove candidates with probability < min_p
+    if (params.min_p > 0.0f && params.min_p < 1.0f) {
+        std::vector<std::pair<float,int>> filtered;
+        filtered.reserve(candidates.size());
+        for (auto &c : candidates) {
+            if (c.first >= params.min_p) {
+                filtered.push_back(c);
+            }
+        }
+        if (!filtered.empty()) {
+            candidates = std::move(filtered);
+        }
+    }
+
+    if (candidates.empty()) {
+        // If we ended up with no candidates due to filtering, fallback to the top token
+        // from the original sorted list (before top-p/min_p).
+        l_llama_on_log(GGML_LOG_LEVEL_WARN, "All candidates removed by filtering. Falling back to highest logit token.", nullptr);
+        candidates.push_back({1.0f, (int)0}); // top token from initial sort was candidates[0]
+    }
+
+    // Renormalize probabilities if we removed any candidates
+    float new_sum = 0.0f;
+    for (auto &c : candidates) {
+        new_sum += c.first;
+    }
+    if (new_sum > 0.0f) {
+        for (auto &c : candidates) {
+            c.first /= new_sum;
+        }
+    } else {
+        // If sum is 0 after filtering, fallback to highest probability token again
+        l_llama_on_log(GGML_LOG_LEVEL_WARN, "Probability sum after filtering is 0. Falling back to first candidate.", nullptr);
+        candidates.clear();
+        candidates.push_back({1.0f, 0});
+    }
+
+    // Sample from distribution
     float r = (float)rand() / (float)RAND_MAX;
-    llama_token new_token_id = 0;
     float cumsum = 0.0f;
-    for (int i = 0; i < n_vocab; i++) {
-        cumsum += probs[i];
+    int new_token_id = candidates[0].second;
+    for (auto &c : candidates) {
+        cumsum += c.first;
         if (r < cumsum) {
-            new_token_id = i;
+            new_token_id = c.second;
             break;
         }
     }
 
-    DEBUG_PRINT("Selected token %d with probability %f\n", new_token_id, probs[new_token_id]);
+    DEBUG_PRINT("Selected token %d\n", new_token_id);
 
     if (new_token_id == llama_token_eos(model)) {
         DEBUG_PRINT("End of sequence token encountered\n");
@@ -613,7 +568,6 @@ extern "C" char* llama_next() {
         return nullptr;
     }
 
-    // Return a heap-allocated copy of cleaned token for C API compatibility
     char* ret = (char*)malloc(cleaned.size() + 1);
     if (!ret) {
         l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Memory allocation failed for token", nullptr);
@@ -642,9 +596,6 @@ extern "C" char* llama_run(int len) {
         if (!next_token) {
             break;
         }
-
-        // Check that appending will not exceed a hypothetical limit
-        // Since using std::string, it's safe. Just append.
         response += next_token;
         free(next_token);
     }
