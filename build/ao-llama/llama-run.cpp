@@ -16,6 +16,7 @@
 #include <cstring>   // for strncpy, etc.
 #include <limits>    // for INFINITY
 #include <random>    // for random sampling if desired
+#include <cctype>    // for isprint
 
 #define CTX_SIZE 8192
 #define BATCH_SIZE 2048
@@ -29,14 +30,15 @@ struct params_struct {
     std::string prompt;
     int n_threads = 4;
     int n_threads_batch = 4;
-    float temperature = 0.7f;   
-    float top_p = 0.9f;         
-    int top_k = 40;             
-    float repeat_penalty = 1.1f;
-    int repeat_last_n = 64;     
-    float min_p = 0.00f;        
+    float temperature = 0.8f;       // default 0.8
+    float top_p = 0.95f;            // default 0.95
+    int top_k = 40;                 // default 40
+    float repeat_penalty = 1.0f;    // default 1.0
+    int repeat_last_n = 64;         // default 64
+    float min_p = 0.05f;            // default 0.05
+    float frequency_penalty = 0.0f; // default off
+    float presence_penalty = 0.0f;  // default off
 };
-
 
 static params_struct params;
 static llama_model* model = nullptr;
@@ -46,50 +48,6 @@ static int tks_processed = 0;
 
 extern "C" bool l_llama_on_progress(float progress, void* user_data);
 extern "C" void l_llama_on_log(enum ggml_log_level level, const char* text, void* user_data);
-
-struct TokenMapping {
-    llama_token token_id;
-    std::string raw_text;
-    std::string replacement;
-};
-
-static std::vector<TokenMapping> special_tokens;
-
-void initialize_special_tokens(llama_model* model) {
-    special_tokens.clear();
-    
-    const int n_vocab = llama_n_vocab(model);
-    if (n_vocab <= 0) {
-        return;
-    }
-
-    const std::vector<std::pair<std::string, std::string>> token_mappings = {
-        {"Ġ", " "},
-        {"▁", " "},
-        {"Ċ", "\n"},
-        {"ĉ", "\n"},
-        {"<0x0A>", "\n"},
-        {"<0x20>", " "},
-    };
-
-    for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
-        const char* token_str = llama_token_get_text(model, token_id);
-        if (!token_str) continue;
-        
-        std::string token_text(token_str);
-        
-        for (const auto& [pattern, replacement] : token_mappings) {
-            if (token_text == pattern) {
-                special_tokens.push_back({token_id, token_text, replacement});
-                DEBUG_PRINT("Found special token: '%s' (id: %d) -> '%s'\n", 
-                            token_text.c_str(), token_id, replacement.c_str());
-                break;
-            }
-        }
-    }
-
-    DEBUG_PRINT("Initialized %zu special tokens\n", special_tokens.size());
-}
 
 void cleanup_resources() {
     if (ctx) {
@@ -146,9 +104,6 @@ extern "C" int llama_load(char* model_path) {
         return 1;
     }
 
-    initialize_special_tokens(model);
-    fprintf(stderr, "Initialized %zu special tokens\n", special_tokens.size());
-    
     const int n_vocab = llama_n_vocab(model);
     fprintf(stderr, "Model loaded with vocabulary size: %d\n", n_vocab);
     
@@ -182,21 +137,13 @@ void llama_reset_context() {
     ctx_params.n_threads_batch = 1;
     ctx_params.offload_kqv = true;
     ctx_params.embeddings = false;
-    ctx_params.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_LINEAR;
-    ctx_params.rope_freq_base = 10000.0f;
-    ctx_params.rope_freq_scale = 1.0f;
 
-    DEBUG_PRINT("Creating new context (n_ctx: %d, n_threads: %d)...\n", 
-                ctx_params.n_ctx, ctx_params.n_threads);
-    
     ctx = llama_new_context_with_model(model, ctx_params);
 
     if (!ctx) {
         l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Failed to create context", nullptr);
         return;
     }
-
-    DEBUG_PRINT("Context created successfully\n");
 }
 
 extern "C" int llama_set_prompt(char* prompt) {
@@ -277,99 +224,6 @@ extern "C" int llama_set_prompt(char* prompt) {
     return 0;
 }
 
-std::string clean_token_text(const char* raw_text) {
-    if (!raw_text) return "";
-    std::string text(raw_text);
-    if (text.empty()) return "";
-
-    static const std::vector<std::string> skip_list = {
-        "<|endoftext|>", "<s>", "", "<pad>", "<unk>", "âĢĶ", "ðŁĮĲðŁĴ", "ðŁ", "Ĳ", "Ĵ", "Į"
-    };
-    for (auto &sk : skip_list) {
-        if (text == sk) {
-            return "";
-        }
-    }
-
-    for (const auto& special : special_tokens) {
-        if (text == special.raw_text) {
-            return special.replacement;
-        }
-    }
-
-    std::string result;
-    size_t i = 0;
-    while (i < text.length()) {
-        bool handled = false;
-        for (const auto& special : special_tokens) {
-            size_t len = special.raw_text.size();
-            if (i + len <= text.size() && text.compare(i, len, special.raw_text) == 0) {
-                result += special.replacement;
-                i += len;
-                handled = true;
-                break;
-            }
-        }
-        if (handled) continue;
-
-        if (i + 3 < text.length() && (unsigned char)text[i] == 0xF0) {
-            i += 4; // skip emoji/unicode sequences
-            continue;
-        }
-
-        if (i + 1 < text.length() && (unsigned char)text[i] == 0xC4) {
-            unsigned char next_char = (unsigned char)text[i + 1];
-            if (next_char == 0xA0) { // Ġ
-                result += ' ';
-                i += 2;
-                continue;
-            } else if (next_char == 0x82) { // Ċ
-                result += '\n';
-                i += 2;
-                continue;
-            } else if (next_char == 0xAE || next_char == 0xB2 || next_char == 0xB4) {
-                i += 2;
-                continue;
-            }
-        }
-
-        if (i + 2 < text.length() &&
-            (unsigned char)text[i] == 0xE2 &&
-            (unsigned char)text[i+1] == 0x96 &&
-            (unsigned char)text[i+2] == 0x81) {
-            result += ' ';
-            i += 3;
-            continue;
-        }
-
-        if (i + 2 < text.length() &&
-            (unsigned char)text[i] == 0xC3 &&
-            (unsigned char)text[i+1] == 0xA2 &&
-            (unsigned char)text[i+2] == 0xC5) {
-            // âĢĶ
-            result += "...";
-            i += 3;
-            continue;
-        }
-
-        if (i + 1 < text.length() &&
-            (unsigned char)text[i] == 0xC3 &&
-            (unsigned char)text[i+1] == 0xB0) {
-            // skip ðŁ
-            i += 2;
-            continue;
-        }
-
-        unsigned char c = (unsigned char)text[i];
-        if (c >= 32 && c <= 126) {
-            result += (char)c;
-        }
-        i++;
-    }
-    
-    return result;
-}
-
 extern "C" char* llama_next() {
     if (!ctx || !model) {
         l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Context or model not initialized", nullptr);
@@ -399,86 +253,94 @@ extern "C" char* llama_next() {
         return nullptr;
     }
 
-    // Apply repetition penalty
+    // ====================================================================================
+    // SAMPLING CHAIN CLOSE TO LLAMA CLI:
+    // 1) Apply repetition/presence/frequency penalty
     if (params.repeat_penalty != 1.0f && params.repeat_last_n > 0) {
         int n_tokens = std::min(params.repeat_last_n, tks_processed);
         if (n_tokens > 0 && (size_t)batch.n_tokens >= (size_t)n_tokens) {
-            std::vector<llama_token> last_tokens(n_tokens);
-            for (int i = 0; i < n_tokens; i++) {
-                last_tokens[i] = batch.token[batch.n_tokens - n_tokens + i];
+            std::unordered_map<llama_token,int> token_counts;
+            for (int i = (int)batch.n_tokens - n_tokens; i < (int)batch.n_tokens; i++) {
+                token_counts[batch.token[i]]++;
             }
-            for (auto tk : last_tokens) {
+
+            for (auto &kv : token_counts) {
+                llama_token tk = kv.first;
+                int count = kv.second;
                 if (tk >= 0 && tk < n_vocab) {
+                    // repetition penalty
                     logits[tk] /= params.repeat_penalty;
+
+                    // presence penalty
+                    if (params.presence_penalty > 0.0f && count > 0) {
+                        logits[tk] -= params.presence_penalty;
+                    }
+
+                    // frequency penalty
+                    if (params.frequency_penalty > 0.0f && count > 0) {
+                        logits[tk] -= params.frequency_penalty * count;
+                    }
                 }
             }
         }
     }
 
-    // Apply temperature
-    if (params.temperature > 0.0f) {
-        for (int i = 0; i < n_vocab; i++) {
-            logits[i] /= params.temperature;
-        }
-    }
-
-    // Create a candidate list
+    // Build candidate list
     std::vector<std::pair<float,int>> candidates;
     candidates.reserve(n_vocab);
     for (int i = 0; i < n_vocab; i++) {
         candidates.push_back({logits[i], i});
     }
 
-    // Sort by logit descending
+    // 2) top_k filtering
     std::sort(candidates.begin(), candidates.end(),
               [](const auto &a, const auto &b) { return a.first > b.first; });
 
-    // Top-k filtering
-    if (params.top_k > 0 && params.top_k < n_vocab) {
+    if (params.top_k > 0 && params.top_k < (int)candidates.size()) {
         candidates.resize(params.top_k);
     }
 
-    // Compute stable softmax on the truncated set
-    // Find max logit
+    // Now compute softmax probabilities for the top_k set
     float max_logit = -INFINITY;
     for (auto &c : candidates) {
         if (c.first > max_logit) max_logit = c.first;
     }
 
-    float sum = 0.0f;
+    float sum_exp = 0.0f;
     for (auto &c : candidates) {
-        float p = expf(c.first - max_logit);
-        c.first = p; // reuse 'first' to store probability
-        sum += p;
+        c.first = expf(c.first - max_logit);
+        sum_exp += c.first;
     }
 
-    if (sum <= 0.0f) {
-        l_llama_on_log(GGML_LOG_LEVEL_ERROR, "No candidates after top-k", nullptr);
-        return nullptr;
-    }
-
-    // Normalize
     for (auto &c : candidates) {
-        c.first /= sum;
+        c.first /= sum_exp;
     }
 
-    // Top-p filtering: remove tokens from the tail until sum of probabilities <= top_p
+    // 3) top_p filtering
     if (params.top_p > 0.0f && params.top_p < 1.0f) {
+        std::sort(candidates.begin(), candidates.end(),
+                  [](auto &a, auto &b){ return a.first > b.first;});
         float cum_sum = 0.0f;
         size_t cutoff = 0;
         for (; cutoff < candidates.size(); cutoff++) {
             cum_sum += candidates[cutoff].first;
             if (cum_sum > params.top_p) {
-                cutoff++; // include current token
+                cutoff++;
                 break;
             }
         }
         if (cutoff < candidates.size()) {
             candidates.resize(cutoff);
         }
+        // renormalize
+        float new_sum = 0.0f;
+        for (auto &c : candidates) new_sum += c.first;
+        if (new_sum > 0.0f) {
+            for (auto &c : candidates) c.first /= new_sum;
+        }
     }
 
-    // min_p filtering: remove candidates with probability < min_p
+    // 4) min_p filtering
     if (params.min_p > 0.0f && params.min_p < 1.0f) {
         std::vector<std::pair<float,int>> filtered;
         filtered.reserve(candidates.size());
@@ -489,33 +351,45 @@ extern "C" char* llama_next() {
         }
         if (!filtered.empty()) {
             candidates = std::move(filtered);
+            float new_sum = 0.0f;
+            for (auto &c : candidates) new_sum += c.first;
+            if (new_sum > 0.0f) {
+                for (auto &c : candidates) c.first /= new_sum;
+            }
+        }
+    }
+
+    // 5) temperature scaling (applied last)
+    if (params.temperature > 0.0f && params.temperature != 1.0f) {
+        // Convert probabilities back to logits
+        // p = exp(logit - max_logit)/sum_exp => logit = log(p*sum_exp)+max_logit
+        // but since we lost original sum_exp after top_k, let's just do a stable log:
+        // logit = log(p), then divide by temp, then softmax again.
+        std::vector<float> new_logits;
+        new_logits.reserve(candidates.size());
+        for (auto &c : candidates) {
+            float l = logf(c.first);
+            l /= params.temperature;
+            new_logits.push_back(l);
+        }
+        float max_l = -INFINITY;
+        for (auto &l : new_logits) if (l > max_l) max_l = l;
+        float sum_l = 0.0f;
+        for (auto &l : new_logits) sum_l += expf(l - max_l);
+        for (size_t i = 0; i < candidates.size(); i++) {
+            candidates[i].first = expf(new_logits[i] - max_l) / sum_l;
         }
     }
 
     if (candidates.empty()) {
-        // If we ended up with no candidates due to filtering, fallback to the top token
-        // from the original sorted list (before top-p/min_p).
-        l_llama_on_log(GGML_LOG_LEVEL_WARN, "All candidates removed by filtering. Falling back to highest logit token.", nullptr);
-        candidates.push_back({1.0f, (int)0}); // top token from initial sort was candidates[0]
-    }
-
-    // Renormalize probabilities if we removed any candidates
-    float new_sum = 0.0f;
-    for (auto &c : candidates) {
-        new_sum += c.first;
-    }
-    if (new_sum > 0.0f) {
-        for (auto &c : candidates) {
-            c.first /= new_sum;
-        }
-    } else {
-        // If sum is 0 after filtering, fallback to highest probability token again
-        l_llama_on_log(GGML_LOG_LEVEL_WARN, "Probability sum after filtering is 0. Falling back to first candidate.", nullptr);
-        candidates.clear();
+        // fallback if no candidates
+        l_llama_on_log(GGML_LOG_LEVEL_WARN, "All candidates removed by filtering. Using highest logit token.", nullptr);
+        // fallback to the first token of original top_k before filtering
+        // If empty, fallback to just token 0
         candidates.push_back({1.0f, 0});
     }
 
-    // Sample from distribution
+    // Sample
     float r = (float)rand() / (float)RAND_MAX;
     float cumsum = 0.0f;
     int new_token_id = candidates[0].second;
@@ -527,18 +401,24 @@ extern "C" char* llama_next() {
         }
     }
 
-    DEBUG_PRINT("Selected token %d\n", new_token_id);
-
     if (new_token_id == llama_token_eos(model)) {
         DEBUG_PRINT("End of sequence token encountered\n");
         return nullptr;
     }
 
-    // Get token string
     const char* token_str = llama_token_get_text(model, new_token_id);
-    std::string cleaned;
+    std::string token_text;
     if (token_str) {
-        cleaned = clean_token_text(token_str);
+        token_text = token_str;
+        if (token_text.empty()) {
+            // Try piece conversion if text is empty
+            char piece[MAX_TOKEN_LEN];
+            int token_len = llama_token_to_piece(model, new_token_id, piece, sizeof(piece)-1, 0, false);
+            if (token_len > 0) {
+                piece[token_len] = '\0';
+                token_text = piece;
+            }
+        }
     } else {
         char piece[MAX_TOKEN_LEN];
         int token_len = llama_token_to_piece(model, new_token_id, piece, sizeof(piece)-1, 0, false);
@@ -547,7 +427,13 @@ extern "C" char* llama_next() {
             return nullptr;
         }
         piece[token_len] = '\0';
-        cleaned = clean_token_text(piece);
+        token_text = piece;
+    }
+
+    // Skip empty tokens
+    if (token_text.empty()) {
+        l_llama_on_log(GGML_LOG_LEVEL_WARN, "Empty token encountered", nullptr);
+        return nullptr;
     }
 
     tks_processed++;
@@ -568,12 +454,12 @@ extern "C" char* llama_next() {
         return nullptr;
     }
 
-    char* ret = (char*)malloc(cleaned.size() + 1);
+    char* ret = (char*)malloc(token_text.size() + 1);
     if (!ret) {
         l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Memory allocation failed for token", nullptr);
         return nullptr;
     }
-    strncpy(ret, cleaned.c_str(), cleaned.size() + 1);
+    strncpy(ret, token_text.c_str(), token_text.size() + 1);
     return ret;
 }
 

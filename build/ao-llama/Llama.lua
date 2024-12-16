@@ -21,6 +21,31 @@ function Llama.setSamplingParams(temp, top_p, top_k, repeat_penalty, repeat_last
     Llama.backend.set_sampling_params(temp, top_p, top_k, repeat_penalty, repeat_last_n, min_p)
 end
 
+function Llama.postProcess(text)
+    -- Many LLaMA-based models use "Ġ" to represent a space.
+    -- Replace "Ġ" with a space.
+    text = string.gsub(text, "Ġ", " ")
+
+    -- Some models also use "▁" to represent a space or newline:
+    text = string.gsub(text, "▁", " ")
+
+    -- Handle "ĊĊ" which represents double newlines in some models
+    text = string.gsub(text, "ĊĊ", "\n\n")
+    -- Handle single "Ċ" as a newline
+    text = string.gsub(text, "Ċ", "\n")
+
+    -- If you see other odd sequences like "âĢĻ", handle them as shown before.
+    text = string.gsub(text, "âĢĻ", "'")
+    text = string.gsub(text, "âĢĶ", "...")
+    -- Add more replacements as needed based on what characters appear in your output.
+
+    -- Trim leading/trailing whitespace:
+    text = string.gsub(text, "^%s+", "")
+    text = string.gsub(text, "%s+$", "")
+
+    return text
+end
+
 function Llama.run(count)
     return Llama.backend.run(count)
 end
