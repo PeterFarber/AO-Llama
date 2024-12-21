@@ -25,6 +25,14 @@
 
 #define DEBUG_PRINT(...) do { if (DEBUG_MODE) fprintf(stderr, __VA_ARGS__); } while (0)
 
+// Checkpoint structure to store system prompt state
+struct checkpoint_state {
+    std::string prompt;
+    std::vector<llama_token> tokens;
+    int tokens_processed;
+    bool is_valid;
+};
+
 struct params_struct {
     std::string model;
     std::string prompt;
@@ -45,6 +53,7 @@ static llama_model* model = nullptr;
 static llama_batch batch = {};
 static llama_context* ctx = nullptr;
 static int tks_processed = 0;
+static checkpoint_state system_checkpoint = {.is_valid = false};  // Store system prompt state
 
 extern "C" bool l_llama_on_progress(float progress, void* user_data);
 extern "C" void l_llama_on_log(enum ggml_log_level level, const char* text, void* user_data);
@@ -95,7 +104,8 @@ extern "C" int llama_load(char* model_path) {
     llama_backend_init();
 
     llama_model_params model_params = llama_model_default_params();
-    model_params.use_mmap = true; 
+    // mmap disabled because it may hamper serialization/reloading process from cache
+    model_params.use_mmap = false; 
     
     model = llama_load_model_from_file(params.model.c_str(), model_params);
 
@@ -135,7 +145,8 @@ void llama_reset_context() {
     ctx_params.n_ctx = std::min(CTX_SIZE, n_ctx_train);
     ctx_params.n_threads = 1;
     ctx_params.n_threads_batch = 1;
-    ctx_params.offload_kqv = true;
+    // offload_kqy disabled because it may hamper serialization/reloading process from cache
+    ctx_params.offload_kqv = false;
     ctx_params.embeddings = false;
 
     ctx = llama_new_context_with_model(model, ctx_params);
@@ -144,6 +155,51 @@ void llama_reset_context() {
         l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Failed to create context", nullptr);
         return;
     }
+}
+
+// Function to create a checkpoint of the current state
+void create_system_checkpoint() {
+    if (!ctx || !model) return;
+    
+    system_checkpoint.prompt = params.prompt;
+    system_checkpoint.tokens_processed = tks_processed;
+    system_checkpoint.is_valid = true;
+    
+    // Store the current token sequence
+    if (batch.n_tokens > 0) {
+        system_checkpoint.tokens.resize(batch.n_tokens);
+        std::copy(batch.token, batch.token + batch.n_tokens, system_checkpoint.tokens.begin());
+    }
+}
+
+// Function to restore from checkpoint
+bool restore_system_checkpoint() {
+    if (!system_checkpoint.is_valid || !model) {
+        return false;
+    }
+    
+    // Reset context and restore from checkpoint
+    llama_reset_context();
+    params.prompt = system_checkpoint.prompt;
+    
+    // Replay the tokens from checkpoint
+    for (size_t i = 0; i < system_checkpoint.tokens.size(); i++) {
+        if (batch.n_tokens >= BATCH_SIZE) {
+            return false;
+        }
+        common_batch_add(batch, system_checkpoint.tokens[i], i, {0}, 
+                        i == system_checkpoint.tokens.size() - 1);
+    }
+    
+    if (batch.n_tokens > 0) {
+        batch.logits[batch.n_tokens - 1] = true;
+        if (llama_decode(ctx, batch) != 0) {
+            return false;
+        }
+    }
+    
+    tks_processed = system_checkpoint.tokens_processed;
+    return true;
 }
 
 extern "C" int llama_set_prompt(char* prompt) {
@@ -199,28 +255,20 @@ extern "C" int llama_set_prompt(char* prompt) {
             l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Decode failed for chunk", nullptr);
             return 1;
         }
-
-        fprintf(stderr, "Processed chunk %zu/%zu (tokens %zu-%zu)\n", 
-                (i / chunk_size) + 1, 
-                (tokens_list.size() + chunk_size - 1) / chunk_size,
-                i, 
-                i + current_chunk_size - 1);
     }
 
-    if (batch.n_tokens > 0) {
-        float* logits = llama_get_logits_ith(ctx, (int)batch.n_tokens - 1);
-        if (logits) {
-            float max_logit = -INFINITY;
-            int vocab = llama_n_vocab(model);
-            for (int i = 0; i < vocab; i++) {
-                if (logits[i] > max_logit) {
-                    max_logit = logits[i];
-                }
-            }
-            fprintf(stderr, "Initial decode completed. Max logit: %f\n", max_logit);
-        }
-    }
+    // Create checkpoint after system prompt is processed
+    create_system_checkpoint();
+    
+    return 0;
+}
 
+// Add function to expose checkpoint restoration
+extern "C" int llama_restore_checkpoint() {
+    if (!restore_system_checkpoint()) {
+        l_llama_on_log(GGML_LOG_LEVEL_ERROR, "Failed to restore checkpoint", nullptr);
+        return 1;
+    }
     return 0;
 }
 

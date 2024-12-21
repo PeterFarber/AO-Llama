@@ -204,8 +204,24 @@ function getLua(model, len, prompt) {
   --Llama.setSamplingParams(0.7, 0.1, 20, 1.3, 64, 0.1)
   local result = ""
   io.stderr:write([[Running...\n]])
-  local str = Llama.run(${len.toString()})
-  return Llama.postProcess(str)
+  --local str = Llama.run(${len.toString()})
+  local stringBuild = ""
+  for i = 1, ${len} do
+    local token = Llama.next()
+    if token == nil then
+      print("Token " .. i ..  " is <nil>")
+      break
+    end
+    stringBuild = stringBuild .. token
+  end
+
+  -- remove surrounding whitespace and newlines
+  stringBuild = stringBuild:gsub("^%s*", ""):gsub("%s*$", "")
+  -- remove trailing punctuation
+  stringBuild = stringBuild:gsub("[%.!%?%s]*$", "")
+
+  --return stringBuild
+  return Llama.postProcess(stringBuild)
   `);
 }
 
